@@ -86,6 +86,13 @@ GatekeeperPreOperation (
     _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
     );
 
+FLT_PREOP_CALLBACK_STATUS
+GatekeeperPreCreate(
+	_Inout_ PFLT_CALLBACK_DATA Data,
+	_In_ PCFLT_RELATED_OBJECTS FltObjects,
+	_Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+);
+
 VOID
 GatekeeperOperationStatusCallback (
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
@@ -135,15 +142,9 @@ EXTERN_C_END
 
 CONST FLT_OPERATION_REGISTRATION Callbacks[] = {
 
-#if 0 // TODO - List all of the requests to filter.
     { IRP_MJ_CREATE,
       0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_CREATE_NAMED_PIPE,
-      0,
-      GatekeeperPreOperation,
+      GatekeeperPreCreate,
       GatekeeperPostOperation },
 
     { IRP_MJ_CLOSE,
@@ -160,178 +161,6 @@ CONST FLT_OPERATION_REGISTRATION Callbacks[] = {
       0,
       GatekeeperPreOperation,
       GatekeeperPostOperation },
-
-    { IRP_MJ_QUERY_INFORMATION,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_SET_INFORMATION,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_QUERY_EA,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_SET_EA,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_FLUSH_BUFFERS,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_QUERY_VOLUME_INFORMATION,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_SET_VOLUME_INFORMATION,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_DIRECTORY_CONTROL,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_FILE_SYSTEM_CONTROL,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_DEVICE_CONTROL,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_INTERNAL_DEVICE_CONTROL,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_SHUTDOWN,
-      0,
-      GatekeeperPreOperationNoPostOperation,
-      NULL },                               //post operations not supported
-
-    { IRP_MJ_LOCK_CONTROL,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_CLEANUP,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_CREATE_MAILSLOT,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_QUERY_SECURITY,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_SET_SECURITY,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_QUERY_QUOTA,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_SET_QUOTA,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_PNP,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_ACQUIRE_FOR_SECTION_SYNCHRONIZATION,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_RELEASE_FOR_SECTION_SYNCHRONIZATION,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_ACQUIRE_FOR_MOD_WRITE,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_RELEASE_FOR_MOD_WRITE,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_ACQUIRE_FOR_CC_FLUSH,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_RELEASE_FOR_CC_FLUSH,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_FAST_IO_CHECK_IF_POSSIBLE,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_NETWORK_QUERY_OPEN,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_MDL_READ,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_MDL_READ_COMPLETE,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_PREPARE_MDL_WRITE,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_MDL_WRITE_COMPLETE,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_VOLUME_MOUNT,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-    { IRP_MJ_VOLUME_DISMOUNT,
-      0,
-      GatekeeperPreOperation,
-      GatekeeperPostOperation },
-
-#endif // TODO
 
     { IRP_MJ_OPERATION_END }
 };
@@ -578,6 +407,20 @@ Return Value:
 
             FltUnregisterFilter( gFilterHandle );
         }
+
+		UNICODE_STRING volumeName;
+		if (!RtlCreateUnicodeString(&volumeName, L"C:")) {
+			// TODO
+			NT_ASSERT(FALSE);
+		}
+
+		PFLT_VOLUME volume;
+		status = FltGetVolumeFromName(gFilterHandle, &volumeName, &volume);
+		NT_ASSERT(NT_SUCCESS(status)); // TODO
+
+		PFLT_INSTANCE instance;
+		status = FltAttachVolume(gFilterHandle, volume, NULL, &instance);
+		NT_ASSERT(NT_SUCCESS(status)); // TODO
     }
 
     return status;
@@ -622,8 +465,48 @@ Return Value:
 /*************************************************************************
     MiniFilter callback routines.
 *************************************************************************/
+
 FLT_PREOP_CALLBACK_STATUS
-GatekeeperPreOperation (
+GatekeeperPreOperation(
+	_Inout_ PFLT_CALLBACK_DATA Data,
+	_In_ PCFLT_RELATED_OBJECTS FltObjects,
+	_Flt_CompletionContext_Outptr_ PVOID *CompletionContext
+)
+/*++
+
+Routine Description:
+
+This routine is a pre-operation dispatch routine for this miniFilter.
+
+This is non-pageable because it could be called on the paging path
+
+Arguments:
+
+Data - Pointer to the filter callbackData that is passed to us.
+
+FltObjects - Pointer to the FLT_RELATED_OBJECTS data structure containing
+opaque handles to this filter, instance, its associated volume and
+file object.
+
+CompletionContext - The context for the completion routine for this
+operation.
+
+Return Value:
+
+The return value is the status of the operation.
+
+--*/
+{
+	// TODO
+	UNREFERENCED_PARAMETER(Data);
+	UNREFERENCED_PARAMETER(FltObjects);
+	UNREFERENCED_PARAMETER(CompletionContext);
+	
+	return FLT_PREOP_SUCCESS_NO_CALLBACK;
+}
+
+FLT_PREOP_CALLBACK_STATUS
+GatekeeperPreCreate (
     _Inout_ PFLT_CALLBACK_DATA Data,
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
     _Flt_CompletionContext_Outptr_ PVOID *CompletionContext
@@ -653,41 +536,54 @@ Return Value:
 
 --*/
 {
-    NTSTATUS status;
+	FLT_PREOP_CALLBACK_STATUS returnStatus = FLT_PREOP_SUCCESS_NO_CALLBACK; // Assume we are NOT going to call our completion routine.
+	PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
 
-    UNREFERENCED_PARAMETER( FltObjects );
+	NTSTATUS status = STATUS_SUCCESS;
+
     UNREFERENCED_PARAMETER( CompletionContext );
 
     PT_DBG_PRINT( PTDBG_TRACE_ROUTINES,
                   ("Gatekeeper!GatekeeperPreOperation: Entered\n") );
 
-    //
-    //  See if this is an operation we would like the operation status
-    //  for.  If so request it.
-    //
-    //  NOTE: most filters do NOT need to do this.  You only need to make
-    //        this call if, for example, you need to know if the oplock was
-    //        actually granted.
-    //
+	if (FltObjects->FileObject == NULL) {
+		status = STATUS_UNSUCCESSFUL;
+		goto exit;
+	}
 
-    if (GatekeeperDoRequestOperationStatus( Data )) {
+	status = FltGetFileNameInformation(Data, FLT_FILE_NAME_OPENED, &nameInfo);
+	if (NT_SUCCESS(status)) {
+		KdPrint(("FLT_FILE_NAME_OPENED %wZ\n", &nameInfo->Name));
+	}
+	else {
+		status = FltGetFileNameInformation(Data, FLT_FILE_NAME_NORMALIZED, &nameInfo);
+		if (NT_SUCCESS(status)) {
+			KdPrint(("FLT_FILE_NAME_NORMALIZED %wZ\n", &nameInfo->Name));
+		}
+		else {
+			// TODO Need to return FLT_PREOP_COMPLETE to fail the IO operation.
+			KdPrint(("Failed to get file name: 0x%x\n", status));
+			goto exit;
+		}
+	}
 
-        status = FltRequestOperationStatusCallback( Data,
-                                                    GatekeeperOperationStatusCallback,
-                                                    (PVOID)(++OperationStatusCtx) );
-        if (!NT_SUCCESS(status)) {
+	if (wcsstr(nameInfo->Name.Buffer, L"gatekeepermatch")) {
+		KdPrint(("Match: %wZ\n", &nameInfo->Name));
+		status = STATUS_ACCESS_DENIED;
+		returnStatus = FLT_PREOP_COMPLETE;
+	}
 
-            PT_DBG_PRINT( PTDBG_TRACE_OPERATION_STATUS,
-                          ("Gatekeeper!GatekeeperPreOperation: FltRequestOperationStatusCallback Failed, status=%08x\n",
-                           status) );
-        }
-    }
 
-    // This template code does not do anything with the callbackData, but
-    // rather returns FLT_PREOP_SUCCESS_WITH_CALLBACK.
-    // This passes the request down to the next miniFilter in the chain.
+exit:
 
-    return FLT_PREOP_SUCCESS_WITH_CALLBACK;
+	if (nameInfo != NULL) {
+		FltReleaseFileNameInformation(nameInfo);
+		nameInfo = NULL;
+	}
+
+	Data->IoStatus.Status = status;
+
+	return returnStatus;
 }
 
 
