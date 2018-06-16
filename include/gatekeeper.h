@@ -22,5 +22,29 @@ Environment:
 
 #define GATEKEEPER_PORT L"\\Gatekeeper"
 
+typedef enum {
+
+	GatekeeperCmdDirectory,
+	GatekeeperCmdClear,
+	GatekeeperCmdRevoke,
+	GatekeeperCmdUnrevoke
+
+} GATEKEEPER_CMD;
+
+
+#pragma warning(push)
+#pragma warning(disable:4200) // disable warnings for structures with zero length arrays.
+
+typedef struct {
+
+	GATEKEEPER_CMD cmd;
+	unsigned char data[];
+
+} GATEKEEPER_MSG, *PGATEKEEPER_MSG;
+
+#pragma warning(pop)
+
+
+
 
 #endif // __GATEKEEPER_H__

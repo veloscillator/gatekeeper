@@ -37,6 +37,60 @@ usage(void)
 	);
 }
 
+HRESULT
+SendGatekeeperMessage(
+	_In_ HANDLE gatekeeperPort,
+	_In_ GATEKEEPER_CMD command,
+	_In_opt_ const char* argument
+)
+/*++
+
+Routine Description:
+
+	Sends specified message to gatekeeper driver (with optional string argument).
+
+Arguments:
+
+	gatekeeperPort - (Open) communication port with driver.
+	command - Command.
+	argument - Optional string sent along as part of message.
+
+Return Value:
+
+	HRESULT.
+
+--*/
+{
+	PGATEKEEPER_MSG msg = NULL;
+
+	const size_t argumentSize = (argument == NULL ? 0 : strlen(argument) + 1); // +1 for \0
+	const size_t msgSize = sizeof(*msg) + argumentSize;
+
+	msg = malloc(msgSize);
+	if (msg == NULL) {
+		return E_OUTOFMEMORY;
+	}
+
+	if (argument != NULL) {
+		memcpy_s(&msg->data, msgSize - offsetof(GATEKEEPER_MSG, data), argument, argumentSize);
+	}
+
+	msg->cmd = command;
+
+	DWORD bytesReturned;
+	HRESULT hr = FilterSendMessage(
+		gatekeeperPort,
+		msg,
+		(DWORD)msgSize,
+		NULL,
+		0,
+		&bytesReturned
+	);
+
+	free(msg);
+	return hr;
+}
+
 int _cdecl
 main(
 	_In_ int argc,
@@ -49,31 +103,14 @@ main(
 
 	--*/
 {
-	HRESULT hr;
-	HANDLE gatekeeperPort = INVALID_HANDLE_VALUE;
+	GATEKEEPER_CMD cmd;
+	char* argument = NULL;
 
 
 	//
-	// Establish connectino with gatekeeper driver.
+	// Parse arguments.
 	//
-
 	
-	hr = FilterConnectCommunicationPort(
-		GATEKEEPER_PORT,
-		0,
-		NULL,
-		0,
-		NULL,
-		&gatekeeperPort);
-	if (FAILED(hr)) {
-		return hr;
-	}
-
-
-	//
-	// Parse arguments and issue command.
-	//
-
 	if (argc < 2) {
 		usage();
 		return E_INVALIDARG;
@@ -83,66 +120,93 @@ main(
 
 		if (argc != 3) {
 			usage();
-			hr = E_INVALIDARG;
-			goto cleanup;
+			return E_INVALIDARG;
 		}
 
 		printf("Setting directory to '%s'...\n", argv[2]);
 
-		// TODO
+		cmd = GatekeeperCmdDirectory;
+		argument = argv[2];
 
-	} else if (strcmp(argv[1], "revoke") == 0) {
+	}
+	else if (strcmp(argv[1], "revoke") == 0) {
 
 		if (argc != 3) {
 			usage();
-			hr = E_INVALIDARG;
-			goto cleanup;
+			return E_INVALIDARG;
 		}
 
 		printf("Creating revoke rule for '%s'...\n", argv[2]);
 
-		// TODO
+		cmd = GatekeeperCmdRevoke;
+		argument = argv[2];
 
-	} else if (strcmp(argv[1], "unrevoke") == 0) {
-		
+	}
+	else if (strcmp(argv[1], "unrevoke") == 0) {
+
 		if (argc != 3) {
 			usage();
-			hr = E_INVALIDARG;
-			goto cleanup;
+			return E_INVALIDARG;
 		}
 
 		printf("Removing revoke rule for '%s'...\n", argv[2]);
 
-		// TODO
+		cmd = GatekeeperCmdUnrevoke;
+		argument = argv[2];
 
-	} else if (strcmp(argv[1], "clear") == 0) {
+	}
+	else if (strcmp(argv[1], "clear") == 0) {
 
 		if (argc != 2) {
 			usage();
-			hr = E_INVALIDARG;
-			goto cleanup;
+			return E_INVALIDARG;
 		}
-		
+
 		printf("Clearing directory and all revoke rules...\n");
 
-		// TODO
+		cmd = GatekeeperCmdClear;
 
-	} else {
+	}
+	else {
 		usage();
-		hr = E_INVALIDARG;
-		goto cleanup;
+		return E_INVALIDARG;
 	}
-
-
-
-
-
 	
-cleanup:
+	
+	//
+	// Establish connectino with gatekeeper driver.
+	//
 
-	if (gatekeeperPort != INVALID_HANDLE_VALUE) {
-		CloseHandle(gatekeeperPort);
+	HANDLE gatekeeperPort;
+	HRESULT hr = FilterConnectCommunicationPort(
+		GATEKEEPER_PORT,
+		0,
+		NULL,
+		0,
+		NULL,
+		&gatekeeperPort);
+	if (FAILED(hr)) {
+		// TODO Message.
+		return hr;
 	}
+
+
+	//
+	// Send message to driver and process response.
+	//
+
+	// TODO Any special handling of directory/clear calls.
+
+	hr = SendGatekeeperMessage(gatekeeperPort, cmd , argument);
+
+	if (SUCCEEDED(hr)) {
+		printf("Operation succeeded\n");
+	} else {
+		// TODO More detail.
+		printf("Operation failed\n");
+	}
+	
+	CloseHandle(gatekeeperPort);
 
 	return hr;
 }
