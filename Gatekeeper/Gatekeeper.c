@@ -586,8 +586,6 @@ exit:
 	return returnStatus;
 }
 
-
-
 VOID
 GatekeeperOperationStatusCallback (
     _In_ PCFLT_RELATED_OBJECTS FltObjects,
