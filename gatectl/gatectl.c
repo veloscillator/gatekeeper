@@ -61,34 +61,26 @@ Return Value:
 
 --*/
 {
-	PGATEKEEPER_MSG msg = NULL;
+	GATEKEEPER_MSG msg;
 
-	const size_t argumentSize = (argument == NULL ? 0 : strlen(argument) + 1); // +1 for \0
-	const size_t msgSize = sizeof(*msg) + argumentSize;
-
-	msg = malloc(msgSize);
-	if (msg == NULL) {
-		return E_OUTOFMEMORY;
-	}
-
+	msg.cmd = command;
 	if (argument != NULL) {
-		memcpy_s(&msg->data, msgSize - offsetof(GATEKEEPER_MSG, data), argument, argumentSize);
+		const size_t argumentSize = strlen(argument) + 1; // +1 for \0
+		if (argumentSize > GATEKEEPER_MAX_PATH) {
+			return E_BOUNDS;
+		}
+		memcpy_s(&msg.data, sizeof(msg) - offsetof(GATEKEEPER_MSG, data), argument, argumentSize);
 	}
-
-	msg->cmd = command;
 
 	DWORD bytesReturned;
-	HRESULT hr = FilterSendMessage(
+	return FilterSendMessage(
 		gatekeeperPort,
-		msg,
-		(DWORD)msgSize,
+		&msg,
+		(DWORD)sizeof(msg),
 		NULL,
 		0,
 		&bytesReturned
 	);
-
-	free(msg);
-	return hr;
 }
 
 int _cdecl

@@ -22,6 +22,10 @@ Environment:
 
 #define GATEKEEPER_PORT L"\\Gatekeeper"
 
+// Defines the max size a path can be.
+// TODO Remove limitation.
+#define GATEKEEPER_MAX_PATH 1024
+
 typedef enum {
 
 	GatekeeperCmdDirectory,
@@ -31,19 +35,12 @@ typedef enum {
 
 } GATEKEEPER_CMD;
 
-
-#pragma warning(push)
-#pragma warning(disable:4200) // disable warnings for structures with zero length arrays.
-
 typedef struct {
 
 	GATEKEEPER_CMD cmd;
-	unsigned char data[];
+	unsigned char data[GATEKEEPER_MAX_PATH];
 
 } GATEKEEPER_MSG, *PGATEKEEPER_MSG;
-
-#pragma warning(pop)
-
 
 
 

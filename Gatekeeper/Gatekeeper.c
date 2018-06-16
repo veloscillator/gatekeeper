@@ -23,9 +23,20 @@ Environment:
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
 
 
-PFLT_FILTER gFilterHandle = NULL;
-PFLT_PORT gServerPort = NULL;
-PFLT_PORT gClientPort = NULL;
+typedef struct {
+
+	PFLT_FILTER Filter;
+
+	PFLT_PORT ServerPort;
+	PFLT_PORT ClientPort;
+
+	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_PATH]; // Don't directly reference. Managed by Directory.
+	UNICODE_STRING Directory;
+
+} GATEKEEPER_DATA;
+
+GATEKEEPER_DATA gatekeeperData;
+
 
 ULONG_PTR OperationStatusCtx = 1;
 
@@ -165,6 +176,9 @@ EXTERN_C_END
 #pragma alloc_text(PAGE, GatekeeperInstanceTeardownComplete)
 #pragma alloc_text(PAGE, GatekeeperConnect)
 #pragma alloc_text(PAGE, GatekeeperDisconnect)
+#pragma alloc_text(PAGE, GatekeeperMessage)
+#pragma alloc_text(PAGE, GatekeeperMessage)
+#pragma alloc_text(PAGE, GatekeeperMessage)
 #pragma alloc_text(PAGE, GatekeeperMessage)
 #endif
 
@@ -421,8 +435,17 @@ Return Value:
 	PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
 		("Gatekeeper!DriverEntry: Entered\n"));
 
-	FLT_ASSERT(gFilterHandle == NULL);
-	FLT_ASSERT(gServerPort == NULL);
+
+	//
+	// Initialize gatekeeper data block.
+	//
+
+	RtlZeroMemory(&gatekeeperData, sizeof(gatekeeperData));
+
+	gatekeeperData.Directory.Buffer = gatekeeperData.DirectoryBufferDoNotUse;
+	gatekeeperData.Directory.Length = 0;
+	gatekeeperData.Directory.MaximumLength = sizeof(gatekeeperData.DirectoryBufferDoNotUse); // Length in bytes.
+	
 
 	try {
 
@@ -433,7 +456,7 @@ Return Value:
 		status = FltRegisterFilter(
 			DriverObject,
 			&FilterRegistration,
-			&gFilterHandle);
+			&gatekeeperData.Filter);
 		if (!NT_SUCCESS(status)) {
 			leave;
 		}
@@ -459,8 +482,8 @@ Return Value:
 		);
 
 		status = FltCreateCommunicationPort(
-			gFilterHandle,
-			&gServerPort,
+			gatekeeperData.Filter,
+			&gatekeeperData.ServerPort,
 			&oa,
 			NULL,
 			GatekeeperConnect,
@@ -478,20 +501,20 @@ Return Value:
 		//  Start filtering i/o
 		//
 
-		status = FltStartFiltering(gFilterHandle);
+		status = FltStartFiltering(gatekeeperData.Filter);
 		if (!NT_SUCCESS(status)) {
 			leave;
 		}
 
 	} finally {
 		if (!NT_SUCCESS(status)) {
-			if (gServerPort != NULL) {
-				FltCloseCommunicationPort(gServerPort);
-				gServerPort = NULL;
+			if (gatekeeperData.ServerPort != NULL) {
+				FltCloseCommunicationPort(gatekeeperData.ServerPort);
+				gatekeeperData.ServerPort = NULL;
 			}
-			if (gFilterHandle != NULL) {
-				FltUnregisterFilter(gFilterHandle);
-				gFilterHandle = NULL;
+			if (gatekeeperData.Filter != NULL) {
+				FltUnregisterFilter(gatekeeperData.Filter);
+				gatekeeperData.Filter = NULL;
 			}
 		}
 	}
@@ -529,9 +552,9 @@ Return Value:
     PT_DBG_PRINT( PTDBG_TRACE_ROUTINES,
                   ("Gatekeeper!GatekeeperUnload: Entered\n") );
 
-	FltCloseCommunicationPort(gServerPort);
+	FltCloseCommunicationPort(gatekeeperData.ServerPort);
 
-    FltUnregisterFilter( gFilterHandle );
+    FltUnregisterFilter(gatekeeperData.Filter);
 
     return STATUS_SUCCESS;
 }
@@ -895,8 +918,10 @@ Return Value:
 	UNREFERENCED_PARAMETER(SizeOfContext);
 	UNREFERENCED_PARAMETER(ConnectionCookie);
 
-	FLT_ASSERT(gClientPort == NULL); // Set MaxConnections to 1. Expect that to be enforced.
-	gClientPort = ClientPort;
+	// TODO Don't have much of a reason to store this unless we're communicating back.
+	// TODO Is there a potential race here?
+	FLT_ASSERT(gatekeeperData.ClientPort == NULL); // Set MaxConnections to 1. Expect that to be enforced.
+	gatekeeperData.ClientPort = ClientPort;
 
 	return STATUS_SUCCESS;
 }
@@ -924,7 +949,7 @@ Return Value:
 	PAGED_CODE();
 	UNREFERENCED_PARAMETER(ConnectionCookie);
 
-	FltCloseClientPort(gFilterHandle, &gClientPort);
+	FltCloseClientPort(gatekeeperData.Filter, &gatekeeperData.ClientPort);
 }
 
 NTSTATUS
@@ -964,11 +989,60 @@ Return Value:
 	PAGED_CODE();
 
 	UNREFERENCED_PARAMETER(ConnectionCookie);
-	UNREFERENCED_PARAMETER(InputBuffer);
 	UNREFERENCED_PARAMETER(InputBufferSize);
 	UNREFERENCED_PARAMETER(OutputBuffer);
 	UNREFERENCED_PARAMETER(OutputBufferSize);
 	UNREFERENCED_PARAMETER(ReturnOutputBufferSize);
+
+
+	GATEKEEPER_MSG message;
+
+	//
+	// Pull message into kernel memory.
+	//
+
+	if (InputBufferSize != sizeof(message)) {
+		return STATUS_INVALID_PARAMETER;
+	}
+
+	try {
+		RtlCopyMemory(&message, InputBuffer, InputBufferSize);
+	} except(EXCEPTION_EXECUTE_HANDLER) {
+		return GetExceptionCode();
+	}
+
+
+	switch (message.cmd) {
+
+	case GatekeeperCmdDirectory: {
+
+		// Validation.
+		// TODO
+
+
+
+		break;
+	}
+	case GatekeeperCmdClear: {
+
+		break;
+	}
+	case GatekeeperCmdRevoke: {
+
+		break;
+	}
+	case GatekeeperCmdUnrevoke: {
+
+		break;
+	}
+
+
+	}
+
+
+
+
+
 
 	// TODO Unimplemented.
 	return STATUS_SUCCESS;
