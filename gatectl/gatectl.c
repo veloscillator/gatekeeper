@@ -15,6 +15,7 @@ Environment:
 --*/
 
 #include <stdlib.h>
+#include "gatekeeper.h"
 
 int _cdecl
 main(
