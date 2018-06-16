@@ -20,7 +20,7 @@ MiniFilter.DriverFiles  = 12            ;%windir%\system32\drivers
 
 [DefaultInstall]
 OptionDesc          = %ServiceDescription%
-CopyFiles           = MiniFilter.DriverFiles
+CopyFiles           = MiniFilter.DriverFiles, MiniFilter.UserFiles
 
 [DefaultInstall.Services]
 AddService          = %ServiceName%,,MiniFilter.Service
@@ -30,7 +30,7 @@ AddService          = %ServiceName%,,MiniFilter.Service
 ;;
 
 [DefaultUninstall]
-DelFiles   = MiniFilter.DriverFiles
+DelFiles   = MiniFilter.DriverFiles, Minifilter.UserFiles
 
 [DefaultUninstall.Services]
 DelService = %ServiceName%,0x200      ;Ensure service is stopped before deleting
@@ -69,8 +69,12 @@ HKR,"Instances\"%Instance1.Name%,"Flags",0x00010001,%Instance1.Flags%
 [MiniFilter.DriverFiles]
 %DriverName%.sys
 
+[MiniFilter.UserFiles]
+gatectl.exe
+
 [SourceDisksFiles]
 Gatekeeper.sys = 1,,
+gatectl.exe = 1,,
 
 [SourceDisksNames]
 1 = %DiskId1%,,,
