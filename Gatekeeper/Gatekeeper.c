@@ -14,16 +14,19 @@ Environment:
 
 --*/
 
+#include "gatekeeper.h"
 #include <fltKernel.h>
 #include <dontuse.h>
 #include <suppress.h>
 
-#include "gatekeeper.h"
 
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
 
 
-PFLT_FILTER gFilterHandle;
+PFLT_FILTER gFilterHandle = NULL;
+PFLT_PORT gServerPort = NULL;
+PFLT_PORT gClientPort = NULL;
+
 ULONG_PTR OperationStatusCtx = 1;
 
 #define PTDBG_TRACE_ROUTINES            0x00000001
@@ -123,6 +126,30 @@ GatekeeperDoRequestOperationStatus(
     _In_ PFLT_CALLBACK_DATA Data
     );
 
+NTSTATUS
+GatekeeperConnect(
+	_In_ PFLT_PORT ClientPort,
+	_In_ PVOID ServerPortCookie,
+	_In_reads_bytes_(SizeOfContext) PVOID ConnectionContext,
+	_In_ ULONG SizeOfContext,
+	_Flt_ConnectionCookie_Outptr_ PVOID *ConnectionCookie
+);
+
+VOID
+GatekeeperDisconnect(
+	_In_opt_ PVOID ConnectionCookie
+);
+
+NTSTATUS
+GatekeeperMessage(
+	_In_ PVOID ConnectionCookie,
+	_In_reads_bytes_opt_(InputBufferSize) PVOID InputBuffer,
+	_In_ ULONG InputBufferSize,
+	_Out_writes_bytes_to_opt_(OutputBufferSize, *ReturnOutputBufferSize) PVOID OutputBuffer,
+	_In_ ULONG OutputBufferSize,
+	_Out_ PULONG ReturnOutputBufferSize
+);
+
 EXTERN_C_END
 
 //
@@ -136,6 +163,9 @@ EXTERN_C_END
 #pragma alloc_text(PAGE, GatekeeperInstanceSetup)
 #pragma alloc_text(PAGE, GatekeeperInstanceTeardownStart)
 #pragma alloc_text(PAGE, GatekeeperInstanceTeardownComplete)
+#pragma alloc_text(PAGE, GatekeeperConnect)
+#pragma alloc_text(PAGE, GatekeeperDisconnect)
+#pragma alloc_text(PAGE, GatekeeperMessage)
 #endif
 
 //
@@ -380,50 +410,91 @@ Return Value:
 
 --*/
 {
-    NTSTATUS status;
+	NTSTATUS status = STATUS_SUCCESS;
 
-    UNREFERENCED_PARAMETER( RegistryPath );
+	PSECURITY_DESCRIPTOR sd;
+	OBJECT_ATTRIBUTES oa;
+	UNICODE_STRING portName;
 
-    PT_DBG_PRINT( PTDBG_TRACE_ROUTINES,
-                  ("Gatekeeper!DriverEntry: Entered\n") );
+	UNREFERENCED_PARAMETER(RegistryPath);
 
-    //
-    //  Register with FltMgr to tell it our callback routines
-    //
+	PT_DBG_PRINT(PTDBG_TRACE_ROUTINES,
+		("Gatekeeper!DriverEntry: Entered\n"));
 
-    status = FltRegisterFilter( DriverObject,
-                                &FilterRegistration,
-                                &gFilterHandle );
+	FLT_ASSERT(gFilterHandle == NULL);
+	FLT_ASSERT(gServerPort == NULL);
 
-    FLT_ASSERT( NT_SUCCESS( status ) );
+	try {
 
-    if (NT_SUCCESS( status )) {
+		//
+		//  Register with FltMgr to tell it our callback routines
+		//
 
-        //
-        //  Start filtering i/o
-        //
-
-        status = FltStartFiltering( gFilterHandle );
-
-        if (!NT_SUCCESS( status )) {
-
-            FltUnregisterFilter( gFilterHandle );
-        }
-
-		UNICODE_STRING volumeName;
-		if (!RtlCreateUnicodeString(&volumeName, L"C:")) {
-			// TODO
-			NT_ASSERT(FALSE);
+		status = FltRegisterFilter(
+			DriverObject,
+			&FilterRegistration,
+			&gFilterHandle);
+		if (!NT_SUCCESS(status)) {
+			leave;
 		}
 
-		PFLT_VOLUME volume;
-		status = FltGetVolumeFromName(gFilterHandle, &volumeName, &volume);
-		NT_ASSERT(NT_SUCCESS(status)); // TODO
+		
+		//
+		// Create port to communicate with gatectl.
+		//
 
-		PFLT_INSTANCE instance;
-		status = FltAttachVolume(gFilterHandle, volume, NULL, &instance);
-		NT_ASSERT(NT_SUCCESS(status)); // TODO
-    }
+		status = FltBuildDefaultSecurityDescriptor(&sd, FLT_PORT_ALL_ACCESS);
+		if (!NT_SUCCESS(status)) {
+			leave;
+		}
+		
+		RtlInitUnicodeString(&portName, GATEKEEPER_PORT);
+
+		InitializeObjectAttributes(
+			&oa,
+			&portName,
+			OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+			NULL,
+			sd
+		);
+
+		status = FltCreateCommunicationPort(
+			gFilterHandle,
+			&gServerPort,
+			&oa,
+			NULL,
+			GatekeeperConnect,
+			GatekeeperDisconnect,
+			GatekeeperMessage,
+			1 // MaxConnections
+		);
+		FltFreeSecurityDescriptor(sd);
+		if (!NT_SUCCESS(status)) {
+			leave;
+		}
+
+
+		//
+		//  Start filtering i/o
+		//
+
+		status = FltStartFiltering(gFilterHandle);
+		if (!NT_SUCCESS(status)) {
+			leave;
+		}
+
+	} finally {
+		if (!NT_SUCCESS(status)) {
+			if (gServerPort != NULL) {
+				FltCloseCommunicationPort(gServerPort);
+				gServerPort = NULL;
+			}
+			if (gFilterHandle != NULL) {
+				FltUnregisterFilter(gFilterHandle);
+				gFilterHandle = NULL;
+			}
+		}
+	}
 
     return status;
 }
@@ -457,6 +528,8 @@ Return Value:
 
     PT_DBG_PRINT( PTDBG_TRACE_ROUTINES,
                   ("Gatekeeper!GatekeeperUnload: Entered\n") );
+
+	FltCloseCommunicationPort(gServerPort);
 
     FltUnregisterFilter( gFilterHandle );
 
@@ -783,4 +856,120 @@ Return Value:
               ((iopb->MajorFunction == IRP_MJ_DIRECTORY_CONTROL) &&
                (iopb->MinorFunction == IRP_MN_NOTIFY_CHANGE_DIRECTORY))
              );
+}
+
+
+NTSTATUS
+GatekeeperConnect(
+	_In_ PFLT_PORT ClientPort,
+	_In_ PVOID ServerPortCookie,
+	_In_reads_bytes_(SizeOfContext) PVOID ConnectionContext,
+	_In_ ULONG SizeOfContext,
+	_Flt_ConnectionCookie_Outptr_ PVOID *ConnectionCookie
+)
+/*++
+
+Routine Description:
+	
+	Called when user-mode connects to server port.
+
+Arguments:
+ 
+	ClientPort - This is the pointer to the client port that
+	will be used to send messages from the filter.
+	ServerPortCookie - unused
+	ConnectionContext - unused
+	SizeofContext   - unused
+	ConnectionCookie - unused
+
+Return Value:
+	
+	NTSTATUS.
+
+--*/
+{
+	PAGED_CODE();
+
+	UNREFERENCED_PARAMETER(ServerPortCookie);
+	UNREFERENCED_PARAMETER(ConnectionContext);
+	UNREFERENCED_PARAMETER(SizeOfContext);
+	UNREFERENCED_PARAMETER(ConnectionCookie);
+
+	FLT_ASSERT(gClientPort == NULL); // Set MaxConnections to 1. Expect that to be enforced.
+	gClientPort = ClientPort;
+
+	return STATUS_SUCCESS;
+}
+
+VOID
+GatekeeperDisconnect(
+	_In_opt_ PVOID ConnectionCookie
+)
+/*++
+
+Routine Description:
+	
+	Called when user <-> kernel mode connection is torn down.
+
+Arguments:
+
+	ConnectionCookie - unused
+
+Return Value:
+
+	None.
+
+--*/
+{
+	PAGED_CODE();
+	UNREFERENCED_PARAMETER(ConnectionCookie);
+
+	FltCloseClientPort(gFilterHandle, &gClientPort);
+}
+
+NTSTATUS
+GatekeeperMessage(
+	_In_ PVOID ConnectionCookie,
+	_In_reads_bytes_opt_(InputBufferSize) PVOID InputBuffer,
+	_In_ ULONG InputBufferSize,
+	_Out_writes_bytes_to_opt_(OutputBufferSize, *ReturnOutputBufferLength) PVOID OutputBuffer,
+	_In_ ULONG OutputBufferSize,
+	_Out_ PULONG ReturnOutputBufferSize
+)
+/*++
+
+Routine Description:
+
+	Called whenever a user-mode applications wishes to communicate with this minifilter.
+
+Arguments:
+
+	ConnectionCookie - unused
+	InputBuffer - A buffer containing input data, can be NULL if there
+		is no input data.
+	InputBufferSize - The size in bytes of the InputBuffer.
+	OutputBuffer - A buffer provided by the application that originated
+		the communication in which to store data to be returned to this
+		application.
+	OutputBufferSize - The size in bytes of the OutputBuffer.
+	ReturnOutputBufferSize - The size in bytes of meaningful data
+		returned in the OutputBuffer.
+
+Return Value:
+
+	NTSTATUS of processing the message.
+
+ --*/
+{
+	PAGED_CODE();
+
+	UNREFERENCED_PARAMETER(ConnectionCookie);
+	UNREFERENCED_PARAMETER(InputBuffer);
+	UNREFERENCED_PARAMETER(InputBufferSize);
+	UNREFERENCED_PARAMETER(OutputBuffer);
+	UNREFERENCED_PARAMETER(OutputBufferSize);
+	UNREFERENCED_PARAMETER(ReturnOutputBufferSize);
+
+	// TODO Unimplemented.
+	return STATUS_SUCCESS;
 }
