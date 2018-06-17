@@ -18,6 +18,7 @@ Environment:
 #include <fltKernel.h>
 #include <dontuse.h>
 #include <suppress.h>
+#include <ntstrsafe.h>
 
 
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
@@ -30,7 +31,7 @@ typedef struct {
 	PFLT_PORT ServerPort;
 	PFLT_PORT ClientPort;
 
-	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_PATH]; // Don't directly reference. Managed by Directory.
+	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_DATA]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
 
 } GATEKEEPER_DATA;
@@ -574,24 +575,24 @@ GatekeeperPreOperation(
 
 Routine Description:
 
-This routine is a pre-operation dispatch routine for this miniFilter.
+	This routine is a pre-operation dispatch routine for this miniFilter.
 
-This is non-pageable because it could be called on the paging path
+	This is non-pageable because it could be called on the paging path
 
 Arguments:
 
-Data - Pointer to the filter callbackData that is passed to us.
+	Data - Pointer to the filter callbackData that is passed to us.
 
-FltObjects - Pointer to the FLT_RELATED_OBJECTS data structure containing
-opaque handles to this filter, instance, its associated volume and
-file object.
+	FltObjects - Pointer to the FLT_RELATED_OBJECTS data structure containing
+	opaque handles to this filter, instance, its associated volume and
+	file object.
 
-CompletionContext - The context for the completion routine for this
-operation.
+	CompletionContext - The context for the completion routine for this
+	operation.
 
 Return Value:
 
-The return value is the status of the operation.
+	The return value is the status of the operation.
 
 --*/
 {
@@ -953,6 +954,60 @@ Return Value:
 }
 
 NTSTATUS
+GatekeeperValidateMessage(
+	_In_ PGATEKEEPER_MSG message
+)
+/*++
+
+	TODO
+
+--*/
+{
+	NTSTATUS status;
+	size_t length;
+
+
+	if (message->cmd == GatekeeperCmdClear) {
+		// Nothing to do.
+		return STATUS_SUCCESS;
+	}
+	if (message->cmd != GatekeeperCmdDirectory &&
+		message->cmd != GatekeeperCmdRevoke &&
+		message->cmd != GatekeeperCmdUnrevoke) {
+		// Not a command.
+		return STATUS_INVALID_PARAMETER;
+	}
+
+
+	//
+	// Validate string argument.
+	//
+
+	static_assert(GATEKEEPER_MAX_DATA <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");	
+	status = RtlStringCchLengthW(
+		message->data,
+		sizeof(message->data) / sizeof(message->data[0]),
+		&length);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+	FLT_ASSERT(length <= GATEKEEPER_MAX_DATA - 1); // Via RtlStringCchLengthW return value.
+
+	if (message->cmd != GatekeeperCmdDirectory) {
+		return STATUS_SUCCESS;
+	}
+
+	//
+	// Validate directory.
+	//
+
+	// TODO
+
+
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS
 GatekeeperMessage(
 	_In_ PVOID ConnectionCookie,
 	_In_reads_bytes_opt_(InputBufferSize) PVOID InputBuffer,
@@ -994,7 +1049,7 @@ Return Value:
 	UNREFERENCED_PARAMETER(OutputBufferSize);
 	UNREFERENCED_PARAMETER(ReturnOutputBufferSize);
 
-
+	NTSTATUS status;
 	GATEKEEPER_MSG message;
 
 	//
@@ -1011,32 +1066,13 @@ Return Value:
 		return GetExceptionCode();
 	}
 
-
-	switch (message.cmd) {
-
-	case GatekeeperCmdDirectory: {
-
-		// Validation.
-		// TODO
+	// TODO Obviously need to lock around any modifications.
 
 
-
-		break;
-	}
-	case GatekeeperCmdClear: {
-
-		break;
-	}
-	case GatekeeperCmdRevoke: {
-
-		break;
-	}
-	case GatekeeperCmdUnrevoke: {
-
-		break;
-	}
-
-
+	// Validation.
+	status = GatekeeperValidateMessage(&message);
+	if (!NT_SUCCESS(status)) {
+		return status;
 	}
 
 

@@ -22,9 +22,9 @@ Environment:
 
 #define GATEKEEPER_PORT L"\\Gatekeeper"
 
-// Defines the max size a path can be.
+// Defines the max size of GATEKEEPER_MSG data field.
 // TODO Remove limitation.
-#define GATEKEEPER_MAX_PATH 1024
+#define GATEKEEPER_MAX_DATA 1024
 
 typedef enum {
 
@@ -38,7 +38,7 @@ typedef enum {
 typedef struct {
 
 	GATEKEEPER_CMD cmd;
-	unsigned char data[GATEKEEPER_MAX_PATH];
+	unsigned short data[GATEKEEPER_MAX_DATA];
 
 } GATEKEEPER_MSG, *PGATEKEEPER_MSG;
 

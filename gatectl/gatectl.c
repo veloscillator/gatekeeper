@@ -41,7 +41,7 @@ HRESULT
 SendGatekeeperMessage(
 	_In_ HANDLE gatekeeperPort,
 	_In_ GATEKEEPER_CMD command,
-	_In_opt_ const char* argument
+	_In_opt_ const wchar_t* argument
 )
 /*++
 
@@ -65,8 +65,8 @@ Return Value:
 
 	msg.cmd = command;
 	if (argument != NULL) {
-		const size_t argumentSize = strlen(argument) + 1; // +1 for \0
-		if (argumentSize > GATEKEEPER_MAX_PATH) {
+		const size_t argumentSize = (wcslen(argument) + 1) * sizeof(argument[0]);
+		if (argumentSize > GATEKEEPER_MAX_DATA) {
 			return E_BOUNDS;
 		}
 		memcpy_s(&msg.data, sizeof(msg) - offsetof(GATEKEEPER_MSG, data), argument, argumentSize);
@@ -84,9 +84,9 @@ Return Value:
 }
 
 int _cdecl
-main(
+wmain(
 	_In_ int argc,
-	_In_reads_(argc) char* argv[])
+	_In_reads_(argc) wchar_t* argv[])
 	/*++
 
 	Routine Description:
@@ -96,7 +96,7 @@ main(
 	--*/
 {
 	GATEKEEPER_CMD cmd;
-	char* argument = NULL;
+	const wchar_t* argument = NULL;
 
 
 	//
@@ -108,46 +108,46 @@ main(
 		return E_INVALIDARG;
 	}
 
-	if (strcmp(argv[1], "directory") == 0) {
+	if (wcscmp(argv[1], L"directory") == 0) {
 
 		if (argc != 3) {
 			usage();
 			return E_INVALIDARG;
 		}
 
-		printf("Setting directory to '%s'...\n", argv[2]);
+		printf("Setting directory to '%ls'...\n", argv[2]);
 
 		cmd = GatekeeperCmdDirectory;
 		argument = argv[2];
 
 	}
-	else if (strcmp(argv[1], "revoke") == 0) {
+	else if (wcscmp(argv[1], L"revoke") == 0) {
 
 		if (argc != 3) {
 			usage();
 			return E_INVALIDARG;
 		}
 
-		printf("Creating revoke rule for '%s'...\n", argv[2]);
+		printf("Creating revoke rule for '%ls'...\n", argv[2]);
 
 		cmd = GatekeeperCmdRevoke;
 		argument = argv[2];
 
 	}
-	else if (strcmp(argv[1], "unrevoke") == 0) {
+	else if (wcscmp(argv[1], L"unrevoke") == 0) {
 
 		if (argc != 3) {
 			usage();
 			return E_INVALIDARG;
 		}
 
-		printf("Removing revoke rule for '%s'...\n", argv[2]);
+		printf("Removing revoke rule for '%ls'...\n", argv[2]);
 
 		cmd = GatekeeperCmdUnrevoke;
 		argument = argv[2];
 
 	}
-	else if (strcmp(argv[1], "clear") == 0) {
+	else if (wcscmp(argv[1], L"clear") == 0) {
 
 		if (argc != 2) {
 			usage();
