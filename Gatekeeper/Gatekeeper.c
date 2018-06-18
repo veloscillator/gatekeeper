@@ -42,7 +42,7 @@ typedef struct {
 
 	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
-	EX_SPIN_LOCK DirectoryLock; // TODO Read-write nature of this is crucial.
+	EX_PUSH_LOCK DirectoryLock; // TODO Read-write nature of this is crucial.
 
 
 	//
@@ -53,7 +53,7 @@ typedef struct {
 	
 	LIST_ENTRY RevokeList;
 	NPAGED_LOOKASIDE_LIST RevokeListFreeBuffers;
-	EX_SPIN_LOCK RevokeListLock;
+	EX_PUSH_LOCK RevokeListLock;
 	
 
 
@@ -464,7 +464,7 @@ Return Value:
 	RtlZeroMemory(&gatekeeperData, sizeof(gatekeeperData));
 
 	
-	gatekeeperData.DirectoryLock = 0;
+	FltInitializePushLock(&gatekeeperData.DirectoryLock);
 	gatekeeperData.Directory.Buffer = gatekeeperData.DirectoryBufferDoNotUse;
 	gatekeeperData.Directory.Length = 0;
 	gatekeeperData.Directory.MaximumLength = sizeof(gatekeeperData.DirectoryBufferDoNotUse); // Length in bytes.
@@ -478,7 +478,7 @@ Return Value:
 		GATEKEEPER_TAG,
 		0);
 	InitializeListHead(&gatekeeperData.RevokeList);
-	gatekeeperData.RevokeListLock = 0;
+	FltInitializePushLock(&gatekeeperData.RevokeListLock);
 
 	
 
@@ -607,9 +607,12 @@ Return Value:
                   ("Gatekeeper!GatekeeperUnload: Entered\n") );
 
 	FltCloseCommunicationPort(gatekeeperData.ServerPort);
+
+	FltDeletePushLock(&gatekeeperData.DirectoryLock);
 	
 	// TODO Empty revoke list.
 	// TODO ExDeleteNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
+	FltDeletePushLock(&gatekeeperData.RevokeListLock);
 
     FltUnregisterFilter(gatekeeperData.Filter);
 
@@ -686,7 +689,7 @@ Return Value:
 	size_t ii;
 	BOOLEAN within = FALSE;
 
-	const KIRQL irql = ExAcquireSpinLockShared(&gatekeeperData.DirectoryLock);
+	FltAcquirePushLockShared(&gatekeeperData.DirectoryLock);
 
 
 	if (gatekeeperData.Directory.Length != 0) {
@@ -722,7 +725,7 @@ Return Value:
 	}
 
 
-	ExReleaseSpinLockShared(&gatekeeperData.DirectoryLock, irql);
+	FltReleasePushLock(&gatekeeperData.DirectoryLock);
 	return within;
 }
 
@@ -1100,7 +1103,6 @@ Return Value:
 {
 	NTSTATUS status = STATUS_SUCCESS;
 	size_t length;
-	KIRQL irql;
 
 	FLT_ASSERT(message->cmd == GatekeeperCmdDirectory);
 
@@ -1121,7 +1123,7 @@ Return Value:
 
 
 
-	irql = ExAcquireSpinLockExclusive(&gatekeeperData.DirectoryLock);
+	FltAcquirePushLockExclusive(&gatekeeperData.DirectoryLock);
 
 	if (gatekeeperData.Directory.Length != 0) {
 		// TODO Clear old info.
@@ -1135,7 +1137,7 @@ Return Value:
 	FLT_ASSERT(length <= MAXUSHORT);
 	gatekeeperData.Directory.Length = (USHORT)length;
 
-	ExReleaseSpinLockExclusive(&gatekeeperData.DirectoryLock, irql);
+	FltReleasePushLock(&gatekeeperData.DirectoryLock);
 
 	return status;
 }
