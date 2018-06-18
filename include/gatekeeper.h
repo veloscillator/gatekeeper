@@ -24,6 +24,7 @@ Environment:
 
 // Defines the max size of GATEKEEPER_MSG data field.
 // TODO Remove limitation.
+// TODO Rename to GATEKEEPER_MAX_BYTES. Be more clear.
 #define GATEKEEPER_MAX_DATA 1024
 
 typedef enum {

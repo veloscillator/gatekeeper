@@ -24,6 +24,10 @@ Environment:
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
 
 
+
+#define GATEKEEPER_TAG 'gtKP'
+
+
 typedef struct {
 
 	PFLT_FILTER Filter;
@@ -31,8 +35,27 @@ typedef struct {
 	PFLT_PORT ServerPort;
 	PFLT_PORT ClientPort;
 
+
+	//
+	// TODO Lot's to say here.
+	//
+
 	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_DATA]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
+	EX_SPIN_LOCK DirectoryLock; // TODO Read-write nature of this is crucial.
+
+
+	//
+	// List of revoke items.
+	//
+	// TODO Limit on length of list?
+	//
+	
+	LIST_ENTRY RevokeList;
+	NPAGED_LOOKASIDE_LIST RevokeListFreeBuffers;
+	EX_SPIN_LOCK RevokeListLock;
+	
+
 
 } GATEKEEPER_DATA;
 
@@ -177,9 +200,6 @@ EXTERN_C_END
 #pragma alloc_text(PAGE, GatekeeperInstanceTeardownComplete)
 #pragma alloc_text(PAGE, GatekeeperConnect)
 #pragma alloc_text(PAGE, GatekeeperDisconnect)
-#pragma alloc_text(PAGE, GatekeeperMessage)
-#pragma alloc_text(PAGE, GatekeeperMessage)
-#pragma alloc_text(PAGE, GatekeeperMessage)
 #pragma alloc_text(PAGE, GatekeeperMessage)
 #endif
 
@@ -443,9 +463,23 @@ Return Value:
 
 	RtlZeroMemory(&gatekeeperData, sizeof(gatekeeperData));
 
+	
+	gatekeeperData.DirectoryLock = 0;
 	gatekeeperData.Directory.Buffer = gatekeeperData.DirectoryBufferDoNotUse;
 	gatekeeperData.Directory.Length = 0;
 	gatekeeperData.Directory.MaximumLength = sizeof(gatekeeperData.DirectoryBufferDoNotUse); // Length in bytes.
+
+	ExInitializeNPagedLookasideList(
+		&gatekeeperData.RevokeListFreeBuffers,
+		NULL,
+		NULL,
+		POOL_NX_ALLOCATION,
+		GATEKEEPER_MAX_DATA,
+		GATEKEEPER_TAG,
+		0);
+	InitializeListHead(&gatekeeperData.RevokeList);
+	gatekeeperData.RevokeListLock = 0;
+
 	
 
 	try {
@@ -507,6 +541,25 @@ Return Value:
 			leave;
 		}
 
+
+
+		//
+		// TODO Temporary code to attach to C: volume. Change to support arbitrary volumes.
+		//
+
+		UNICODE_STRING volumeName = RTL_CONSTANT_STRING(L"C:");
+
+		PFLT_VOLUME volume;
+		status = FltGetVolumeFromName(gatekeeperData.Filter, &volumeName, &volume);
+		FLT_ASSERT(NT_SUCCESS(status)); // TODO
+
+		status = FltAttachVolume(gatekeeperData.Filter, volume, NULL, NULL);
+		FLT_ASSERT(NT_SUCCESS(status)); // TODO
+
+		FltObjectDereference(volume);
+
+
+
 	} finally {
 		if (!NT_SUCCESS(status)) {
 			if (gatekeeperData.ServerPort != NULL) {
@@ -554,6 +607,9 @@ Return Value:
                   ("Gatekeeper!GatekeeperUnload: Entered\n") );
 
 	FltCloseCommunicationPort(gatekeeperData.ServerPort);
+	
+	// TODO Empty revoke list.
+	// TODO ExDeleteNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
 
     FltUnregisterFilter(gatekeeperData.Filter);
 
@@ -650,21 +706,16 @@ Return Value:
 		goto exit;
 	}
 
-	status = FltGetFileNameInformation(Data, FLT_FILE_NAME_OPENED, &nameInfo);
-	if (NT_SUCCESS(status)) {
-		KdPrint(("FLT_FILE_NAME_OPENED %wZ\n", &nameInfo->Name));
+	status = FltGetFileNameInformation(Data, FLT_FILE_NAME_OPENED | FLT_FILE_NAME_QUERY_DEFAULT, &nameInfo);
+	if (!NT_SUCCESS(status)) {
+		// Fail IO if we cannot get name.
+		KdPrint(("Failed to get file name: 0x%x\n", status));
+		returnStatus = FLT_PREOP_COMPLETE;
+		goto exit;
 	}
-	else {
-		status = FltGetFileNameInformation(Data, FLT_FILE_NAME_NORMALIZED, &nameInfo);
-		if (NT_SUCCESS(status)) {
-			KdPrint(("FLT_FILE_NAME_NORMALIZED %wZ\n", &nameInfo->Name));
-		}
-		else {
-			// TODO Need to return FLT_PREOP_COMPLETE to fail the IO operation.
-			KdPrint(("Failed to get file name: 0x%x\n", status));
-			goto exit;
-		}
-	}
+
+	KdPrint(("FLT_FILE_NAME_OPENED %wZ\n", &nameInfo->Name));
+
 
 	if (wcsstr(nameInfo->Name.Buffer, L"gatekeepermatch")) {
 		KdPrint(("Match: %wZ\n", &nameInfo->Name));
@@ -954,7 +1005,7 @@ Return Value:
 }
 
 NTSTATUS
-GatekeeperValidateMessage(
+GatekeeperMessageSetDirectory(
 	_In_ PGATEKEEPER_MSG message
 )
 /*++
@@ -963,27 +1014,18 @@ GatekeeperValidateMessage(
 
 --*/
 {
-	NTSTATUS status;
+	NTSTATUS status = STATUS_SUCCESS;
 	size_t length;
+	KIRQL irql;
 
-
-	if (message->cmd == GatekeeperCmdClear) {
-		// Nothing to do.
-		return STATUS_SUCCESS;
-	}
-	if (message->cmd != GatekeeperCmdDirectory &&
-		message->cmd != GatekeeperCmdRevoke &&
-		message->cmd != GatekeeperCmdUnrevoke) {
-		// Not a command.
-		return STATUS_INVALID_PARAMETER;
-	}
+	FLT_ASSERT(message->cmd == GatekeeperCmdDirectory);
 
 
 	//
 	// Validate string argument.
 	//
 
-	static_assert(GATEKEEPER_MAX_DATA <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");	
+	static_assert(GATEKEEPER_MAX_DATA <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
 	status = RtlStringCchLengthW(
 		message->data,
 		sizeof(message->data) / sizeof(message->data[0]),
@@ -993,18 +1035,23 @@ GatekeeperValidateMessage(
 	}
 	FLT_ASSERT(length <= GATEKEEPER_MAX_DATA - 1); // Via RtlStringCchLengthW return value.
 
-	if (message->cmd != GatekeeperCmdDirectory) {
-		return STATUS_SUCCESS;
+
+
+	irql = ExAcquireSpinLockExclusive(&gatekeeperData.DirectoryLock);
+
+	if (gatekeeperData.Directory.Length != 0) {
+		// TODO Clear old info.
 	}
 
-	//
-	// Validate directory.
-	//
+	status = RtlStringCchCopyW(
+		gatekeeperData.Directory.Buffer,
+		sizeof(gatekeeperData.DirectoryBufferDoNotUse),
+		message->data);
+	FLT_ASSERT(NT_SUCCESS(status)); // Via validation above.
 
-	// TODO
+	ExReleaseSpinLockExclusive(&gatekeeperData.DirectoryLock, irql);
 
-
-	return STATUS_SUCCESS;
+	return status;
 }
 
 NTSTATUS
@@ -1049,8 +1096,8 @@ Return Value:
 	UNREFERENCED_PARAMETER(OutputBufferSize);
 	UNREFERENCED_PARAMETER(ReturnOutputBufferSize);
 
-	NTSTATUS status;
 	GATEKEEPER_MSG message;
+
 
 	//
 	// Pull message into kernel memory.
@@ -1066,16 +1113,20 @@ Return Value:
 		return GetExceptionCode();
 	}
 
-	// TODO Obviously need to lock around any modifications.
 
-
-	// Validation.
-	status = GatekeeperValidateMessage(&message);
-	if (!NT_SUCCESS(status)) {
-		return status;
+	switch (message.cmd) {
+	case GatekeeperCmdClear:
+		// TODO
+		break;
+	case GatekeeperCmdDirectory:
+		return GatekeeperMessageSetDirectory(&message);
+	case GatekeeperCmdRevoke:
+		// TODO
+		break;
+	case GatekeeperCmdUnrevoke:
+		// TODO
+		break;
 	}
-
-
 
 
 
