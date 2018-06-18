@@ -25,7 +25,7 @@ Environment:
 // Defines the max size of GATEKEEPER_MSG data field.
 // TODO Remove limitation.
 // TODO Rename to GATEKEEPER_MAX_BYTES. Be more clear.
-#define GATEKEEPER_MAX_DATA 1024
+#define GATEKEEPER_MAX_BYTES 1024
 
 typedef enum {
 
@@ -39,7 +39,7 @@ typedef enum {
 typedef struct {
 
 	GATEKEEPER_CMD cmd;
-	unsigned short data[GATEKEEPER_MAX_DATA];
+	unsigned short data[GATEKEEPER_MAX_BYTES];
 
 } GATEKEEPER_MSG, *PGATEKEEPER_MSG;
 

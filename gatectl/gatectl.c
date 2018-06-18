@@ -66,7 +66,7 @@ Return Value:
 	msg.cmd = command;
 	if (argument != NULL) {
 		const size_t argumentSize = (wcslen(argument) + 1) * sizeof(argument[0]);
-		if (argumentSize > GATEKEEPER_MAX_DATA) {
+		if (argumentSize > GATEKEEPER_MAX_BYTES) {
 			return E_BOUNDS;
 		}
 		memcpy_s(&msg.data, sizeof(msg) - offsetof(GATEKEEPER_MSG, data), argument, argumentSize);

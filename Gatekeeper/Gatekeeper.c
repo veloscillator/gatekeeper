@@ -40,7 +40,7 @@ typedef struct {
 	// TODO Lot's to say here.
 	//
 
-	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_DATA]; // Don't directly reference. Managed by Directory.
+	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
 	EX_SPIN_LOCK DirectoryLock; // TODO Read-write nature of this is crucial.
 
@@ -474,7 +474,7 @@ Return Value:
 		NULL,
 		NULL,
 		POOL_NX_ALLOCATION,
-		GATEKEEPER_MAX_DATA,
+		GATEKEEPER_MAX_BYTES,
 		GATEKEEPER_TAG,
 		0);
 	InitializeListHead(&gatekeeperData.RevokeList);
@@ -660,6 +660,72 @@ Return Value:
 	return FLT_PREOP_SUCCESS_NO_CALLBACK;
 }
 
+BOOLEAN
+GatekeeperWithinDirectory(
+	_In_ PUNICODE_STRING FilePath,
+	_In_ BOOLEAN IgnoreCase
+)
+/*++
+
+Routine Description:
+
+	Tells whether file is within the configured directory.
+
+Arguments:
+
+	FilePath - Full path to file.
+
+	IgnoreCase - Is filesystem case insensitive?
+
+Return Value:
+
+	TRUE if file within configured directory. FALSE otherwise.
+
+--*/
+{
+	size_t ii;
+	BOOLEAN within = FALSE;
+
+	const KIRQL irql = ExAcquireSpinLockShared(&gatekeeperData.DirectoryLock);
+
+
+	if (gatekeeperData.Directory.Length != 0) {
+		// TODO This is a pretty rudimentary way of performing this comparison. See nc!NcComparePath in
+		// https://github.com/Microsoft/Windows-driver-samples/tree/master/filesys/miniFilter/NameChanger
+		for (ii = 0; TRUE; ii++) {
+			if (ii >= gatekeeperData.Directory.Length) {
+				// Consumed all of directory path without a mismatch. Directory is prefix of FilePath.
+				within = TRUE;
+				break;
+			}
+			if (ii >= FilePath->Length) {
+				// TODO Think more about this. What if we are opening directory?
+				within = FALSE;
+				break;
+			}
+
+			if (IgnoreCase) {
+				if (RtlUpcaseUnicodeChar(gatekeeperData.Directory.Buffer[ii]) !=
+					RtlUpcaseUnicodeChar(FilePath->Buffer[ii])) {
+					within = FALSE;
+					break;
+				}
+			}
+			else {
+				if (gatekeeperData.Directory.Buffer[ii] !=
+					FilePath->Buffer[ii]) {
+					within = FALSE;
+					break;
+				}
+			}
+		}
+	}
+
+
+	ExReleaseSpinLockShared(&gatekeeperData.DirectoryLock, irql);
+	return within;
+}
+
 FLT_PREOP_CALLBACK_STATUS
 GatekeeperPreCreate (
     _Inout_ PFLT_CALLBACK_DATA Data,
@@ -695,6 +761,7 @@ Return Value:
 	PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
 
 	NTSTATUS status = STATUS_SUCCESS;
+	BOOLEAN ignoreCase = TRUE;
 
     UNREFERENCED_PARAMETER( CompletionContext );
 
@@ -714,7 +781,14 @@ Return Value:
 		goto exit;
 	}
 
-	KdPrint(("FLT_FILE_NAME_OPENED %wZ\n", &nameInfo->Name));
+	FLT_ASSERT(Data->Iopb != NULL);
+	ignoreCase = !BooleanFlagOn(Data->Iopb->OperationFlags, SL_CASE_SENSITIVE);
+
+	if (GatekeeperWithinDirectory(&nameInfo->Name, ignoreCase)) {
+		KdPrint(("Open %wZ\n", &nameInfo->Name));
+	}
+
+
 
 
 	if (wcsstr(nameInfo->Name.Buffer, L"gatekeepermatch")) {
@@ -1010,7 +1084,17 @@ GatekeeperMessageSetDirectory(
 )
 /*++
 
-	TODO
+Routine Description:
+
+	Sets global gatekeeper directory based on the given message after validating path.
+
+Arguments:
+
+	message - Describes new directory.
+
+Return Value:
+
+	NTSTATUS.
 
 --*/
 {
@@ -1025,7 +1109,7 @@ GatekeeperMessageSetDirectory(
 	// Validate string argument.
 	//
 
-	static_assert(GATEKEEPER_MAX_DATA <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
+	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
 	status = RtlStringCchLengthW(
 		message->data,
 		sizeof(message->data) / sizeof(message->data[0]),
@@ -1033,7 +1117,7 @@ GatekeeperMessageSetDirectory(
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
-	FLT_ASSERT(length <= GATEKEEPER_MAX_DATA - 1); // Via RtlStringCchLengthW return value.
+	FLT_ASSERT(length <= GATEKEEPER_MAX_BYTES - 1); // Via RtlStringCchLengthW return value.
 
 
 
@@ -1048,6 +1132,8 @@ GatekeeperMessageSetDirectory(
 		sizeof(gatekeeperData.DirectoryBufferDoNotUse),
 		message->data);
 	FLT_ASSERT(NT_SUCCESS(status)); // Via validation above.
+	FLT_ASSERT(length <= MAXUSHORT);
+	gatekeeperData.Directory.Length = (USHORT)length;
 
 	ExReleaseSpinLockExclusive(&gatekeeperData.DirectoryLock, irql);
 
