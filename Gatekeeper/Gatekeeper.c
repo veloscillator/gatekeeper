@@ -1103,6 +1103,12 @@ Return Value:
 {
 	NTSTATUS status = STATUS_SUCCESS;
 	size_t length;
+	HANDLE handle;
+	PFILE_OBJECT fileObj;
+	OBJECT_ATTRIBUTES oa;
+	UNICODE_STRING requestedName;
+	IO_STATUS_BLOCK ioStatus;
+	PFLT_FILE_NAME_INFORMATION nameInfo;
 
 	FLT_ASSERT(message->cmd == GatekeeperCmdDirectory);
 
@@ -1119,9 +1125,61 @@ Return Value:
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
-	FLT_ASSERT(length <= GATEKEEPER_MAX_BYTES - 1); // Via RtlStringCchLengthW return value.
+	FLT_ASSERT(length + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
 
 
+	//
+	// Validate existence of file and get absolute path.
+	//
+
+	requestedName.Buffer = message->data;
+	FLT_ASSERT(length <= MAXUSHORT); // TODO Should not be assert.
+	requestedName.Length = (USHORT)length;
+	requestedName.MaximumLength = (USHORT)length;
+
+	InitializeObjectAttributes(
+		&oa,
+		&requestedName,
+		OBJ_KERNEL_HANDLE,
+		NULL,
+		NULL);
+
+	status = FltCreateFileEx(
+		gatekeeperData.Filter,
+		NULL, // Instance
+		&handle,
+		&fileObj,
+		0, // Desired access
+		&oa,
+		&ioStatus,
+		0,
+		FILE_ATTRIBUTE_NORMAL,
+		0, // Share access
+		FILE_OPEN, // Open only. Don't create.
+		FILE_DIRECTORY_FILE,                  // Create Options
+		NULL,
+		0,
+		IO_IGNORE_SHARE_ACCESS_CHECK);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+	status = FltGetFileNameInformationUnsafe(fileObj, NULL, FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT, &nameInfo);
+	if (!NT_SUCCESS(status)) {
+		FltClose(handle);
+		return status;
+	}
+
+	FltClose(handle);
+
+	if (nameInfo->Name.Length >= sizeof(gatekeeperData.DirectoryBufferDoNotUse)) {
+		FltReleaseFileNameInformation(nameInfo);
+		return STATUS_INVALID_PARAMETER;
+	}
+
+
+	//
+	// Validation complete. Set directory.
+	//
 
 	FltAcquirePushLockExclusive(&gatekeeperData.DirectoryLock);
 
@@ -1132,12 +1190,14 @@ Return Value:
 	status = RtlStringCchCopyW(
 		gatekeeperData.Directory.Buffer,
 		sizeof(gatekeeperData.DirectoryBufferDoNotUse),
-		message->data);
+		nameInfo->Name.Buffer);
 	FLT_ASSERT(NT_SUCCESS(status)); // Via validation above.
-	FLT_ASSERT(length <= MAXUSHORT);
-	gatekeeperData.Directory.Length = (USHORT)length;
+	FLT_ASSERT(nameInfo->Name.Length <= MAXUSHORT); // TODO Should not be assert.
+	gatekeeperData.Directory.Length = (USHORT)nameInfo->Name.Length;
 
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
+
+	FltReleaseFileNameInformation(nameInfo);
 
 	return status;
 }

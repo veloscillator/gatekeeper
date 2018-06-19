@@ -22,6 +22,7 @@ _Analysis_mode_(_Analysis_code_type_user_code_)
 #include <fltUser.h>
 #include <stdio.h>
 #include <assert.h>
+#include <strsafe.h>
 #include "gatekeeper.h"
 
 
@@ -95,8 +96,10 @@ wmain(
 
 	--*/
 {
+	HRESULT hr;
 	GATEKEEPER_CMD cmd;
 	const wchar_t* argument = NULL;
+	WCHAR scratch[GATEKEEPER_MAX_BYTES]; // Temporary scratch space.
 
 
 	//
@@ -110,6 +113,9 @@ wmain(
 
 	if (wcscmp(argv[1], L"directory") == 0) {
 
+		WCHAR scratch2[GATEKEEPER_MAX_BYTES]; // Need more scratch space for path conversion.
+		DWORD len;
+
 		if (argc != 3) {
 			usage();
 			return E_INVALIDARG;
@@ -117,8 +123,27 @@ wmain(
 
 		printf("Setting directory to '%ls'...\n", argv[2]);
 
+		//
+		// Convert path to weird format needed by driver.
+		//
+
+		len = GetFullPathNameW(argv[2], sizeof(scratch2) / sizeof(TCHAR), scratch2, NULL);
+		if (len == 0) {
+			// TODO Get error code.
+			return E_FAIL;
+		} else if (len > sizeof(scratch2) / sizeof(TCHAR)) {
+			return E_BOUNDS;
+		}
+
+		hr = StringCchPrintf(scratch, sizeof(scratch) / sizeof(scratch[0]), L"\\??\\%s", scratch2);
+		if (FAILED(hr)) {
+			return hr;
+		}
+
+		printf("full path '%ls' weird path '%ls'\n", scratch2, scratch);
+
 		cmd = GatekeeperCmdDirectory;
-		argument = argv[2];
+		argument = scratch;
 
 	}
 	else if (wcscmp(argv[1], L"revoke") == 0) {
@@ -170,7 +195,7 @@ wmain(
 	//
 
 	HANDLE gatekeeperPort;
-	HRESULT hr = FilterConnectCommunicationPort(
+	hr = FilterConnectCommunicationPort(
 		GATEKEEPER_PORT,
 		0,
 		NULL,
