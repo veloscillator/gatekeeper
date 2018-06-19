@@ -40,6 +40,7 @@ typedef struct {
 	// TODO Lot's to say here.
 	//
 
+	// TODO Do we really need UNICODE_STRING?
 	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
 	EX_PUSH_LOCK DirectoryLock; // TODO Read-write nature of this is crucial.
@@ -58,6 +59,14 @@ typedef struct {
 
 
 } GATEKEEPER_DATA;
+
+typedef struct {
+
+	LIST_ENTRY List;
+
+	WCHAR RevokeItem[GATEKEEPER_MAX_BYTES];
+
+} REVOKE_LIST, *PREVOKE_LIST;
 
 GATEKEEPER_DATA gatekeeperData;
 
@@ -1083,7 +1092,7 @@ Return Value:
 
 NTSTATUS
 GatekeeperMessageSetDirectory(
-	_In_ PGATEKEEPER_MSG message
+	_In_ PGATEKEEPER_MSG Message
 )
 /*++
 
@@ -1093,7 +1102,7 @@ Routine Description:
 
 Arguments:
 
-	message - Describes new directory.
+	Message - Describes new directory.
 
 Return Value:
 
@@ -1110,7 +1119,7 @@ Return Value:
 	IO_STATUS_BLOCK ioStatus;
 	PFLT_FILE_NAME_INFORMATION nameInfo;
 
-	FLT_ASSERT(message->cmd == GatekeeperCmdDirectory);
+	FLT_ASSERT(Message->cmd == GatekeeperCmdDirectory);
 
 
 	//
@@ -1119,8 +1128,8 @@ Return Value:
 
 	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
 	status = RtlStringCchLengthW(
-		message->data,
-		sizeof(message->data) / sizeof(message->data[0]),
+		Message->data,
+		sizeof(Message->data) / sizeof(Message->data[0]),
 		&length);
 	if (!NT_SUCCESS(status)) {
 		return status;
@@ -1132,7 +1141,7 @@ Return Value:
 	// Validate existence of file and get absolute path.
 	//
 
-	requestedName.Buffer = message->data;
+	requestedName.Buffer = Message->data;
 	FLT_ASSERT(length <= MAXUSHORT); // TODO Should not be assert.
 	requestedName.Length = (USHORT)length;
 	requestedName.MaximumLength = (USHORT)length;
@@ -1156,7 +1165,7 @@ Return Value:
 		FILE_ATTRIBUTE_NORMAL,
 		0, // Share access
 		FILE_OPEN, // Open only. Don't create.
-		FILE_DIRECTORY_FILE,                  // Create Options
+		FILE_DIRECTORY_FILE, // Create Options
 		NULL,
 		0,
 		IO_IGNORE_SHARE_ACCESS_CHECK);
@@ -1170,6 +1179,7 @@ Return Value:
 	}
 
 	FltClose(handle);
+	handle = NULL;
 
 	if (nameInfo->Name.Length >= sizeof(gatekeeperData.DirectoryBufferDoNotUse)) {
 		FltReleaseFileNameInformation(nameInfo);
@@ -1200,6 +1210,65 @@ Return Value:
 	FltReleaseFileNameInformation(nameInfo);
 
 	return status;
+}
+
+NTSTATUS
+GatekeeperMessageRevoke(
+	_In_ PGATEKEEPER_MSG Message
+)
+/*++
+
+Routine Description:
+
+	Add new item to revoke list.
+
+Arguments:
+
+	Message - Contains new item to add.
+
+Return Value:
+
+	NTSTATUS.
+
+--*/
+{
+	NTSTATUS status;
+	size_t length;
+	PREVOKE_LIST newItem;
+
+	//
+	// Validate string argument.
+	//
+
+	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
+	status = RtlStringCchLengthW(
+		Message->data,
+		sizeof(Message->data) / sizeof(Message->data[0]),
+		&length);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+	FLT_ASSERT(length + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
+
+
+	//
+	// Insert into revoke list.
+	//
+
+	// TODO Need sync?
+	newItem = ExAllocateFromNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
+	if (newItem == NULL) {
+		return STATUS_NO_MEMORY;
+	}
+
+	status = RtlStringCchCopyW(newItem->RevokeItem, sizeof(newItem->RevokeItem) / sizeof(newItem->RevokeItem[0]), Message->data);
+	FLT_ASSERT(NT_SUCCESS(status)); // Due to validateion.
+
+	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
+	InsertHeadList(&gatekeeperData.RevokeList, &newItem->List);
+	FltReleasePushLock(&gatekeeperData.RevokeListLock);
+
+	return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -1269,8 +1338,7 @@ Return Value:
 	case GatekeeperCmdDirectory:
 		return GatekeeperMessageSetDirectory(&message);
 	case GatekeeperCmdRevoke:
-		// TODO
-		break;
+		return GatekeeperMessageRevoke(&message);
 	case GatekeeperCmdUnrevoke:
 		// TODO
 		break;
