@@ -25,7 +25,7 @@ Environment:
 
 
 
-#define GATEKEEPER_TAG 'gtKP'
+#define GATEKEEPER_TAG 'gtKP' // Tag memory allocations to detect leaks.
 
 
 typedef struct {
@@ -62,11 +62,12 @@ typedef struct {
 
 typedef struct {
 
-	LIST_ENTRY List;
+	LIST_ENTRY ListBlock;
 
-	WCHAR RevokeItem[GATEKEEPER_MAX_BYTES];
+	UNICODE_STRING Rule;
+	WCHAR RevokeRuleBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't access directly.
 
-} REVOKE_LIST, *PREVOKE_LIST;
+} REVOKE_RULE, *PREVOKE_RULE;
 
 GATEKEEPER_DATA gatekeeperData;
 
@@ -746,6 +747,44 @@ Return Value:
 	return within;
 }
 
+BOOLEAN
+GatekeeperMatchRevokeRule(
+	_In_ PCUNICODE_STRING Path,
+	_In_ const PREVOKE_RULE Rule
+)
+/*++
+
+Routine Description:
+
+	Tries to match revoke rule to path by checking if rule is a substring of path.
+
+Arguments:
+
+	Path - Path to apply rule to.
+
+	Rule - Rule that defines match.
+
+Return Value:
+
+	TRUE if match found. FALSE otherwise.
+
+--*/
+{
+	size_t charIndex;
+
+	// Get length in characters.
+	const size_t pathLen = Path->Length / sizeof(WCHAR);
+	const size_t ruleLen = Rule->Rule.Length / sizeof(WCHAR);
+
+	for (charIndex = 0; charIndex + ruleLen <= pathLen; charIndex++) {
+		if (_wcsnicmp(&Path->Buffer[charIndex], Rule->Rule.Buffer, ruleLen) == 0) {
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
+
 FLT_PREOP_CALLBACK_STATUS
 GatekeeperPreCreate (
     _Inout_ PFLT_CALLBACK_DATA Data,
@@ -821,9 +860,9 @@ Return Value:
 
 	while (current != head) {
 
-		PREVOKE_LIST rule = CONTAINING_RECORD(current, REVOKE_LIST, List);
+		PREVOKE_RULE rule = CONTAINING_RECORD(current, REVOKE_RULE, ListBlock);
 
-		if (wcsstr(nameInfo->Name.Buffer, rule->RevokeItem)) {
+		if (GatekeeperMatchRevokeRule(&nameInfo->Name, rule)) {
 			matched = TRUE;
 			break;
 		}
@@ -1237,6 +1276,7 @@ Return Value:
 	FLT_ASSERT(nameInfo->Name.Length <= MAXUSHORT); // TODO Should not be assert.
 	FLT_ASSERT(nameInfo->Name.Length % sizeof(WCHAR) == 0);
 	gatekeeperData.Directory.Length = (USHORT)nameInfo->Name.Length;
+	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&gatekeeperData.Directory)));
 
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
 
@@ -1265,7 +1305,7 @@ Return Value:
 --*/
 {
 	PLIST_ENTRY pList;
-	PREVOKE_LIST revokeList;
+	PREVOKE_RULE rule;
 
 
 	//
@@ -1278,9 +1318,8 @@ Return Value:
 
 		pList = RemoveHeadList(&gatekeeperData.RevokeList);
 
-		revokeList = CONTAINING_RECORD(pList, REVOKE_LIST, List);
-		ExFreeToNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers, revokeList); // TODO Don't hold lock around me.
-
+		rule = CONTAINING_RECORD(pList, REVOKE_RULE, ListBlock);
+		ExFreeToNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers, rule); // TODO Don't hold lock around me.
 
 	}
 
@@ -1304,7 +1343,7 @@ GatekeeperMessageRevoke(
 
 Routine Description:
 
-	Add new item to revoke list.
+	Add new item to revoke list. Does not detect repeats.
 
 Arguments:
 
@@ -1319,7 +1358,7 @@ Return Value:
 	NTSTATUS status;
 	size_t lengthChars;
 	size_t lengthBytes;
-	PREVOKE_LIST newItem;
+	PREVOKE_RULE newRule;
 
 	FLT_ASSERT(Message->cmd == GatekeeperCmdRevoke);
 
@@ -1328,6 +1367,8 @@ Return Value:
 	//
 
 	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
+	static_assert(GATEKEEPER_MAX_BYTES <= UNICODE_STRING_MAX_BYTES, "restrictions of UNICODE_STRING");
+
 	status = RtlStringCchLengthW(
 		Message->data,
 		sizeof(Message->data) / sizeof(Message->data[0]),
@@ -1340,20 +1381,30 @@ Return Value:
 
 
 	//
-	// Insert into revoke list.
+	// Create REVOKE_RULE structure.
 	//
 
-	// TODO Need sync?
-	newItem = ExAllocateFromNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
-	if (newItem == NULL) {
+	newRule = ExAllocateFromNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
+	if (newRule == NULL) {
 		return STATUS_NO_MEMORY;
 	}
 
-	status = RtlStringCchCopyW(newItem->RevokeItem, sizeof(newItem->RevokeItem) / sizeof(newItem->RevokeItem[0]), Message->data);
-	FLT_ASSERT(NT_SUCCESS(status)); // Due to validateion.
+	newRule->Rule.Buffer = newRule->RevokeRuleBufferDoNotUse;
+	newRule->Rule.MaximumLength = sizeof(newRule->RevokeRuleBufferDoNotUse); // In bytes.
+
+	status = RtlStringCchCopyW(newRule->Rule.Buffer, newRule->Rule.MaximumLength / sizeof(newRule->Rule.Buffer[0]), Message->data);
+	FLT_ASSERT(NT_SUCCESS(status)); // Due to above validation.
+	newRule->Rule.Length = (USHORT)lengthBytes;
+
+	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&newRule->Rule)));
+
+
+	//
+	// Insert into RevokeList.
+	//
 
 	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
-	InsertHeadList(&gatekeeperData.RevokeList, &newItem->List);
+	InsertHeadList(&gatekeeperData.RevokeList, &newRule->ListBlock);
 	FltReleasePushLock(&gatekeeperData.RevokeListLock);
 
 	return STATUS_SUCCESS;
@@ -1376,7 +1427,7 @@ GatekeeperMessage(
 	_In_ PVOID ConnectionCookie,
 	_In_reads_bytes_opt_(InputBufferSize) PVOID InputBuffer,
 	_In_ ULONG InputBufferSize,
-	_Out_writes_bytes_to_opt_(OutputBufferSize, *ReturnOutputBufferLength) PVOID OutputBuffer,
+	_Out_writes_bytes_to_opt_(OutputBufferSize, *ReturnOutputBufferSize) PVOID OutputBuffer,
 	_In_ ULONG OutputBufferSize,
 	_Out_ PULONG ReturnOutputBufferSize
 )
