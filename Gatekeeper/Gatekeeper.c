@@ -674,7 +674,7 @@ Return Value:
 
 BOOLEAN
 GatekeeperWithinDirectory(
-	_In_ PUNICODE_STRING FilePath,
+	_In_ const PUNICODE_STRING FilePath,
 	_In_ BOOLEAN IgnoreCase
 )
 /*++
@@ -695,44 +695,52 @@ Return Value:
 
 --*/
 {
-	size_t ii;
+	size_t charIndex;
 	BOOLEAN within = FALSE;
 
 	FltAcquirePushLockShared(&gatekeeperData.DirectoryLock);
 
+	// Get length in WCHARS.
+	FLT_ASSERT(FilePath->Length % sizeof(WCHAR) == 0);
+	const size_t pathChars = FilePath->Length / sizeof(WCHAR);
+	const size_t directoryChars = gatekeeperData.Directory.Length / sizeof(WCHAR);
 
-	if (gatekeeperData.Directory.Length != 0) {
-		// TODO This is a pretty rudimentary way of performing this comparison. See nc!NcComparePath in
-		// https://github.com/Microsoft/Windows-driver-samples/tree/master/filesys/miniFilter/NameChanger
-		for (ii = 0; TRUE; ii++) {
-			if (ii >= gatekeeperData.Directory.Length) {
-				// Consumed all of directory path without a mismatch. Directory is prefix of FilePath.
-				within = TRUE;
-				break;
-			}
-			if (ii >= FilePath->Length) {
-				// TODO Think more about this. What if we are opening directory?
+	if (directoryChars == 0) {
+		FltReleasePushLock(&gatekeeperData.DirectoryLock);
+		return FALSE;
+	}
+
+	// TODO This is a pretty rudimentary way of performing this comparison. See nc!NcComparePath in
+	// https://github.com/Microsoft/Windows-driver-samples/tree/master/filesys/miniFilter/NameChanger
+	for (charIndex = 0; TRUE; charIndex++) {
+
+		if (charIndex >= directoryChars) {
+			// Consumed all of directory path without a mismatch. Directory is prefix of FilePath.
+			within = TRUE;
+			break;
+		}
+		if (charIndex >= pathChars) {
+			// TODO Think more about this. What if we are opening directory?
+			within = FALSE;
+			break;
+		}
+
+		if (IgnoreCase) {
+			if (RtlUpcaseUnicodeChar(gatekeeperData.Directory.Buffer[charIndex]) !=
+				RtlUpcaseUnicodeChar(FilePath->Buffer[charIndex])) {
 				within = FALSE;
 				break;
 			}
-
-			if (IgnoreCase) {
-				if (RtlUpcaseUnicodeChar(gatekeeperData.Directory.Buffer[ii]) !=
-					RtlUpcaseUnicodeChar(FilePath->Buffer[ii])) {
-					within = FALSE;
-					break;
-				}
-			}
-			else {
-				if (gatekeeperData.Directory.Buffer[ii] !=
-					FilePath->Buffer[ii]) {
-					within = FALSE;
-					break;
-				}
+		}
+		else {
+			if (gatekeeperData.Directory.Buffer[charIndex] !=
+				FilePath->Buffer[charIndex]) {
+				within = FALSE;
+				break;
 			}
 		}
-	}
 
+	}
 
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
 	return within;
@@ -793,7 +801,7 @@ Return Value:
 		goto exit;
 	}
 
-	FLT_ASSERT(Data->Iopb != NULL);
+	FLT_ASSERT(Data->Iopb != NULL); 
 	ignoreCase = !BooleanFlagOn(Data->Iopb->OperationFlags, SL_CASE_SENSITIVE);
 
 	if (GatekeeperWithinDirectory(&nameInfo->Name, ignoreCase)) {
@@ -1111,7 +1119,8 @@ Return Value:
 --*/
 {
 	NTSTATUS status = STATUS_SUCCESS;
-	size_t length;
+	size_t lengthChars;
+	size_t lengthBytes;
 	HANDLE handle;
 	PFILE_OBJECT fileObj;
 	OBJECT_ATTRIBUTES oa;
@@ -1130,11 +1139,12 @@ Return Value:
 	status = RtlStringCchLengthW(
 		Message->data,
 		sizeof(Message->data) / sizeof(Message->data[0]),
-		&length);
+		&lengthChars);
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
-	FLT_ASSERT(length + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
+	lengthBytes = lengthChars * sizeof(WCHAR);
+	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
 
 
 	//
@@ -1142,9 +1152,9 @@ Return Value:
 	//
 
 	requestedName.Buffer = Message->data;
-	FLT_ASSERT(length <= MAXUSHORT); // TODO Should not be assert.
-	requestedName.Length = (USHORT)length;
-	requestedName.MaximumLength = (USHORT)length;
+	FLT_ASSERT(lengthBytes <= MAXUSHORT); // TODO Should not be assert.
+	requestedName.Length = (USHORT)lengthBytes;
+	requestedName.MaximumLength = (USHORT)lengthBytes;
 
 	InitializeObjectAttributes(
 		&oa,
@@ -1158,7 +1168,7 @@ Return Value:
 		NULL, // Instance
 		&handle,
 		&fileObj,
-		0, // Desired access
+		FILE_LIST_DIRECTORY | FILE_TRAVERSE, // Desired access
 		&oa,
 		&ioStatus,
 		0,
@@ -1199,10 +1209,11 @@ Return Value:
 
 	status = RtlStringCchCopyW(
 		gatekeeperData.Directory.Buffer,
-		sizeof(gatekeeperData.DirectoryBufferDoNotUse),
+		sizeof(gatekeeperData.DirectoryBufferDoNotUse) / sizeof(WCHAR), // Size, in characters.
 		nameInfo->Name.Buffer);
 	FLT_ASSERT(NT_SUCCESS(status)); // Via validation above.
 	FLT_ASSERT(nameInfo->Name.Length <= MAXUSHORT); // TODO Should not be assert.
+	FLT_ASSERT(nameInfo->Name.Length % sizeof(WCHAR) == 0);
 	gatekeeperData.Directory.Length = (USHORT)nameInfo->Name.Length;
 
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
@@ -1233,7 +1244,8 @@ Return Value:
 --*/
 {
 	NTSTATUS status;
-	size_t length;
+	size_t lengthChars;
+	size_t lengthBytes;
 	PREVOKE_LIST newItem;
 
 	//
@@ -1244,11 +1256,12 @@ Return Value:
 	status = RtlStringCchLengthW(
 		Message->data,
 		sizeof(Message->data) / sizeof(Message->data[0]),
-		&length);
+		&lengthChars);
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
-	FLT_ASSERT(length + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
+	lengthBytes = lengthChars * sizeof(WCHAR);
+	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
 
 
 	//
