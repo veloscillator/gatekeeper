@@ -804,19 +804,41 @@ Return Value:
 	FLT_ASSERT(Data->Iopb != NULL); 
 	ignoreCase = !BooleanFlagOn(Data->Iopb->OperationFlags, SL_CASE_SENSITIVE);
 
-	if (GatekeeperWithinDirectory(&nameInfo->Name, ignoreCase)) {
-		KdPrint(("Open %wZ\n", &nameInfo->Name));
+	if (!GatekeeperWithinDirectory(&nameInfo->Name, ignoreCase)) {
+		// Nothing to do for this file.
+		goto exit;
 	}
 
+	// TODO Log to file.
+	KdPrint(("Mine: %wZ\n", &nameInfo->Name));
 
+	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
+	
+	BOOLEAN matched = FALSE;
+	PLIST_ENTRY head = &gatekeeperData.RevokeList;
+	PLIST_ENTRY prev = &gatekeeperData.RevokeList;
+	PLIST_ENTRY current = prev->Flink;
 
+	while (current != head) {
 
-	if (wcsstr(nameInfo->Name.Buffer, L"gatekeepermatch")) {
+		PREVOKE_LIST rule = CONTAINING_RECORD(current, REVOKE_LIST, List);
+
+		if (wcsstr(nameInfo->Name.Buffer, rule->RevokeItem)) {
+			matched = TRUE;
+			break;
+		}
+
+		prev = current;
+		current = prev->Flink;
+	}
+
+	FltReleasePushLock(&gatekeeperData.RevokeListLock);
+
+	if (matched) {
 		KdPrint(("Match: %wZ\n", &nameInfo->Name));
 		status = STATUS_ACCESS_DENIED;
 		returnStatus = FLT_PREOP_COMPLETE;
 	}
-
 
 exit:
 
@@ -1223,6 +1245,57 @@ Return Value:
 	return status;
 }
 
+void
+GatekeeperMessageClear(void)
+/*++
+
+Routine Description:
+
+	Reset all state. Clears revoke rules and configured directory. State undefined
+	(but valid) if interleaved with other requests.
+
+Arguments:
+
+	None.
+
+Return Value:
+
+	None.
+
+--*/
+{
+	PLIST_ENTRY pList;
+	PREVOKE_LIST revokeList;
+
+
+	//
+	// First, clear revoke list.
+	//
+
+	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
+
+	while (!IsListEmpty(&gatekeeperData.RevokeList)) {
+
+		pList = RemoveHeadList(&gatekeeperData.RevokeList);
+
+		revokeList = CONTAINING_RECORD(pList, REVOKE_LIST, List);
+		ExFreeToNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers, revokeList); // TODO Don't hold lock around me.
+
+
+	}
+
+	FltReleasePushLock(&gatekeeperData.RevokeListLock);
+
+
+	//
+	// Clear directory.
+	//
+
+	FltAcquirePushLockExclusive(&gatekeeperData.DirectoryLock);
+	gatekeeperData.Directory.Length = 0;
+	FltReleasePushLock(&gatekeeperData.DirectoryLock);
+}
+
 NTSTATUS
 GatekeeperMessageRevoke(
 	_In_ PGATEKEEPER_MSG Message
@@ -1247,6 +1320,8 @@ Return Value:
 	size_t lengthChars;
 	size_t lengthBytes;
 	PREVOKE_LIST newItem;
+
+	FLT_ASSERT(Message->cmd == GatekeeperCmdRevoke);
 
 	//
 	// Validate string argument.
@@ -1282,6 +1357,18 @@ Return Value:
 	FltReleasePushLock(&gatekeeperData.RevokeListLock);
 
 	return STATUS_SUCCESS;
+}
+
+NTSTATUS
+GatekeeperMessageUnrevoke(
+	_In_ PGATEKEEPER_MSG Message
+)
+/*++
+
+--*/
+{
+	(void)Message;
+	return STATUS_ABANDONED; // TODO
 }
 
 NTSTATUS
@@ -1321,7 +1408,6 @@ Return Value:
 	PAGED_CODE();
 
 	UNREFERENCED_PARAMETER(ConnectionCookie);
-	UNREFERENCED_PARAMETER(InputBufferSize);
 	UNREFERENCED_PARAMETER(OutputBuffer);
 	UNREFERENCED_PARAMETER(OutputBufferSize);
 	UNREFERENCED_PARAMETER(ReturnOutputBufferSize);
@@ -1343,23 +1429,18 @@ Return Value:
 		return GetExceptionCode();
 	}
 
-
+	// TODO Arguments to these maybe WCHAR*/len or UNICODE_STRING
 	switch (message.cmd) {
 	case GatekeeperCmdClear:
-		// TODO
-		break;
+		GatekeeperMessageClear();
+		return STATUS_SUCCESS;
 	case GatekeeperCmdDirectory:
 		return GatekeeperMessageSetDirectory(&message);
 	case GatekeeperCmdRevoke:
 		return GatekeeperMessageRevoke(&message);
 	case GatekeeperCmdUnrevoke:
-		// TODO
-		break;
+		return GatekeeperMessageUnrevoke(&message);
+	default:
+		return STATUS_INVALID_PARAMETER;
 	}
-
-
-
-
-	// TODO Unimplemented.
-	return STATUS_SUCCESS;
 }
