@@ -181,6 +181,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <FilesToPackage Include="S:\Code\gatekeeper\test\sanity.bat">
+      <PackageRelativeDirectory>
+      </PackageRelativeDirectory>
+    </FilesToPackage>
     <FilesToPackage Include="S:\Code\gatekeeper\x64\Debug\Gatekeeper.sys">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>

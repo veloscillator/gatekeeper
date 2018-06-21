@@ -757,6 +757,7 @@ GatekeeperMatchRevokeRule(
 Routine Description:
 
 	Tries to match revoke rule to path by checking if rule is a substring of path.
+	Case insensitive.
 
 Arguments:
 
@@ -851,7 +852,7 @@ Return Value:
 	// TODO Log to file.
 	KdPrint(("Mine: %wZ\n", &nameInfo->Name));
 
-	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
+	FltAcquirePushLockShared(&gatekeeperData.RevokeListLock);
 	
 	BOOLEAN matched = FALSE;
 	PLIST_ENTRY head = &gatekeeperData.RevokeList;
@@ -1343,7 +1344,7 @@ GatekeeperMessageRevoke(
 
 Routine Description:
 
-	Add new item to revoke list. Does not detect repeats.
+	Creates a revoke rule. Does not detect duplicates.
 
 Arguments:
 
@@ -1416,10 +1417,66 @@ GatekeeperMessageUnrevoke(
 )
 /*++
 
+Routine Description:
+
+	Delete a revoke rule. Does not handle duplicates. Case sensitive.
+
+Arguments:
+
+	Message - Revoke rule to delete.
+
+Return Value:
+
+	NTSTATUS. STATUS_NOT_FOUND if no such rule.
+
 --*/
 {
-	(void)Message;
-	return STATUS_ABANDONED; // TODO
+	NTSTATUS status;
+	size_t lengthChars;
+	size_t lengthBytes;
+	UNICODE_STRING ruleToDelete;
+
+	// TODO Getting repetitive.
+	status = RtlStringCchLengthW(
+		Message->data,
+		sizeof(Message->data) / sizeof(Message->data[0]),
+		&lengthChars);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+	lengthBytes = lengthChars * sizeof(WCHAR);
+	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
+
+	ruleToDelete.Buffer = Message->data;
+	ruleToDelete.MaximumLength = sizeof(Message->data);
+	ruleToDelete.Length = (USHORT)lengthBytes;
+	
+	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock); // TODO Can get shared and upgrade.
+
+	PLIST_ENTRY head = &gatekeeperData.RevokeList;
+	PLIST_ENTRY prev = &gatekeeperData.RevokeList;
+	PLIST_ENTRY current = prev->Flink;
+
+	status = STATUS_NOT_FOUND;
+	while (current != head) {
+
+		PREVOKE_RULE rule = CONTAINING_RECORD(current, REVOKE_RULE, ListBlock);
+
+		if (RtlEqualUnicodeString(&ruleToDelete, &rule->Rule, FALSE)) {
+			// Remove from list.
+			prev->Flink = current->Flink;
+			current->Flink->Blink = prev;
+			status = STATUS_SUCCESS;
+			break;
+		}
+
+		prev = current;
+		current = prev->Flink;
+	}
+
+	FltReleasePushLock(&gatekeeperData.RevokeListLock);
+
+	return status;
 }
 
 NTSTATUS

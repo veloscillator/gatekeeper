@@ -121,8 +121,6 @@ wmain(
 			return E_INVALIDARG;
 		}
 
-		printf("Setting directory to '%ls'...\n", argv[2]);
-
 		//
 		// Convert path to weird format needed by driver.
 		//
@@ -140,7 +138,9 @@ wmain(
 			return hr;
 		}
 
-		printf("full path '%ls' weird path '%ls'\n", scratch2, scratch);
+		printf("Setting directory to '%ls' ('%ls')...\n", scratch2, scratch);
+
+		// TODO Trailing \
 
 		cmd = GatekeeperCmdDirectory;
 		argument = scratch;
@@ -203,7 +203,8 @@ wmain(
 		NULL,
 		&gatekeeperPort);
 	if (FAILED(hr)) {
-		// TODO Message.
+		// TODO Message..\ga	
+		printf("Failed to open driver port\n");
 		return hr;
 	}
 
