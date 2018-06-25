@@ -898,6 +898,7 @@ Return Value:
 	if (gatekeeperData.LogHandle != NULL) {
 
 		// Construct log message.
+		// TODO Log user ID and timestamp.
 		logBufferSizeChars = sizeof(logBuffer) / sizeof(logBuffer[0]);
 		status = RtlStringCchPrintfExA(
 			logBuffer,
