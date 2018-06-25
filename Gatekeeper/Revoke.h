@@ -25,6 +25,11 @@ Environment:
 
 typedef struct {
 
+	//
+	// Represents single revoke rule (currently implemented as simple string-matching).
+	// Note in linked list.
+	//
+
 	LIST_ENTRY ListBlock;
 
 	UNICODE_STRING Rule;
@@ -33,9 +38,15 @@ typedef struct {
 } REVOKE_RULE, *PREVOKE_RULE;
 
 typedef struct {
+
+	//
+	// Linked list of revoke rules with reader/writer lock.
+	//
+
 	LIST_ENTRY Rules;
 	NPAGED_LOOKASIDE_LIST FreeBuffers;
 	EX_PUSH_LOCK Lock;
+
 } REVOKE_LIST, *PREVOKE_LIST;
 
 
