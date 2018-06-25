@@ -15,6 +15,7 @@ Environment:
 --*/
 
 #include "gatekeeper.h"
+#include "Revoke.h"
 #include <fltKernel.h>
 #include <dontuse.h>
 #include <suppress.h>
@@ -22,9 +23,6 @@ Environment:
 
 
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
-
-
-#define GATEKEEPER_TAG 'gtKP' // Tag memory allocations to detect leaks.
 
 
 typedef struct {
@@ -48,9 +46,7 @@ typedef struct {
 	// List of revoke items.
 	//
 	
-	LIST_ENTRY RevokeList;
-	NPAGED_LOOKASIDE_LIST RevokeListFreeBuffers;
-	EX_PUSH_LOCK RevokeListLock;
+	REVOKE_LIST RevokeList;
 	
 
 	//
@@ -66,15 +62,6 @@ typedef struct {
 	EX_PUSH_LOCK LogPathLock;
 
 } GATEKEEPER_DATA;
-
-typedef struct {
-
-	LIST_ENTRY ListBlock;
-
-	UNICODE_STRING Rule;
-	WCHAR RevokeRuleBufferDoNotUse[GATEKEEPER_MAX_WCHARS]; // Don't access directly. Managed by Rule.
-
-} REVOKE_RULE, *PREVOKE_RULE;
 
 
 // Global data block for gatekeeper.
@@ -489,17 +476,7 @@ Return Value:
 	gatekeeperData.Directory.Length = 0;
 	gatekeeperData.Directory.MaximumLength = sizeof(gatekeeperData.DirectoryBufferDoNotUse); // Length in bytes.
 
-	ExInitializeNPagedLookasideList(
-		&gatekeeperData.RevokeListFreeBuffers,
-		NULL,
-		NULL,
-		POOL_NX_ALLOCATION,
-		GATEKEEPER_MAX_BYTES,
-		GATEKEEPER_TAG,
-		0);
-	InitializeListHead(&gatekeeperData.RevokeList);
-	FltInitializePushLock(&gatekeeperData.RevokeListLock);
-
+	RevokeListInit(&gatekeeperData.RevokeList);
 	
 
 	try {
@@ -642,8 +619,7 @@ Return Value:
 	FltDeletePushLock(&gatekeeperData.DirectoryLock);
 	
 	// Revoke rules.
-	ExDeleteNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers); // GatekeeperClear freed all nodes.
-	FltDeletePushLock(&gatekeeperData.RevokeListLock);
+	RevokeListDestroy(&gatekeeperData.RevokeList);
 
     FltUnregisterFilter(gatekeeperData.Filter);
 
@@ -770,45 +746,6 @@ Return Value:
 	return within;
 }
 
-BOOLEAN
-GatekeeperMatchRevokeRule(
-	_In_ PCUNICODE_STRING Path,
-	_In_ const PREVOKE_RULE Rule
-)
-/*++
-
-Routine Description:
-
-	Tries to match revoke rule to path by checking if rule is a substring of path.
-	Case insensitive.
-
-Arguments:
-
-	Path - Path to apply rule to.
-
-	Rule - Rule that defines match.
-
-Return Value:
-
-	TRUE if match found. FALSE otherwise.
-
---*/
-{
-	size_t charIndex;
-
-	// Get length in characters.
-	const size_t pathLen = Path->Length / sizeof(WCHAR);
-	const size_t ruleLen = Rule->Rule.Length / sizeof(WCHAR);
-
-	for (charIndex = 0; charIndex + ruleLen <= pathLen; charIndex++) {
-		if (_wcsnicmp(&Path->Buffer[charIndex], Rule->Rule.Buffer, ruleLen) == 0) {
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-}
-
 FLT_PREOP_CALLBACK_STATUS
 GatekeeperPreCreate (
     _Inout_ PFLT_CALLBACK_DATA Data,
@@ -933,32 +870,10 @@ Return Value:
 
 
 	//
-	// Apply revoke rules.
+	// If we've matched any revoke rules, end the IO and deny access.
 	//
 
-	FltAcquirePushLockShared(&gatekeeperData.RevokeListLock);
-	
-	BOOLEAN matched = FALSE;
-	PLIST_ENTRY head = &gatekeeperData.RevokeList;
-	PLIST_ENTRY prev = &gatekeeperData.RevokeList;
-	PLIST_ENTRY current = prev->Flink;
-
-	while (current != head) {
-
-		PREVOKE_RULE rule = CONTAINING_RECORD(current, REVOKE_RULE, ListBlock);
-
-		if (GatekeeperMatchRevokeRule(&nameInfo->Name, rule)) {
-			matched = TRUE;
-			break;
-		}
-
-		prev = current;
-		current = prev->Flink;
-	}
-
-	FltReleasePushLock(&gatekeeperData.RevokeListLock);
-
-	if (matched) {
+	if (RevokeListApplyRules(&gatekeeperData.RevokeList, &nameInfo->Name)) {
 		status = STATUS_ACCESS_DENIED;
 		returnStatus = FLT_PREOP_COMPLETE;
 	}
@@ -1243,7 +1158,7 @@ Return Value:
 
 NTSTATUS
 GatekeeperMessageSetDirectory(
-	_In_ PGATEKEEPER_MSG Message
+	_In_ PUNICODE_STRING Path
 )
 /*++
 
@@ -1253,7 +1168,7 @@ Routine Description:
 
 Arguments:
 
-	Message - Describes new directory.
+	Path - Path to new directory.
 
 Return Value:
 
@@ -1262,46 +1177,22 @@ Return Value:
 --*/
 {
 	NTSTATUS status = STATUS_SUCCESS;
-	size_t lengthChars;
-	size_t lengthBytes;
 	HANDLE handle;
 	PFILE_OBJECT fileObj;
 	OBJECT_ATTRIBUTES oa;
-	UNICODE_STRING requestedName;
 	IO_STATUS_BLOCK ioStatus;
 	PFLT_FILE_NAME_INFORMATION nameInfo;
 
-	FLT_ASSERT(Message->cmd == GatekeeperCmdDirectory);
+	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(Path)));
 
 
 	//
-	// Validate string argument.
+	// Validate existence of directory.
 	//
-
-	status = RtlStringCchLengthW(
-		Message->data,
-		sizeof(Message->data) / sizeof(Message->data[0]),
-		&lengthChars);
-	if (!NT_SUCCESS(status)) {
-		return status;
-	}
-	lengthBytes = lengthChars * sizeof(WCHAR);
-	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
-
-
-	//
-	// Validate existence of file and get absolute path.
-	//
-
-	requestedName.Buffer = Message->data;
-	FLT_ASSERT(lengthBytes <= MAXUSHORT); // TODO Should not be assert.
-	requestedName.Length = (USHORT)lengthBytes;
-	requestedName.MaximumLength = (USHORT)lengthBytes;
-	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&requestedName)));
 
 	InitializeObjectAttributes(
 		&oa,
-		&requestedName,
+		Path,
 		OBJ_KERNEL_HANDLE,
 		NULL,
 		NULL);
@@ -1325,6 +1216,12 @@ Return Value:
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
+
+
+	//
+	// Get normalized path.
+	//
+
 	status = FltGetFileNameInformationUnsafe(fileObj, NULL, FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT, &nameInfo);
 	if (!NT_SUCCESS(status)) {
 		FltClose(handle);
@@ -1333,6 +1230,9 @@ Return Value:
 
 	FltClose(handle);
 	handle = NULL;
+
+	FLT_ASSERT(nameInfo->Name.Length <= MAXUSHORT); // TODO Should not be assert.
+	FLT_ASSERT(nameInfo->Name.Length % sizeof(WCHAR) == 0);
 
 	if (nameInfo->Name.Length >= sizeof(gatekeeperData.DirectoryBufferDoNotUse)) {
 		FltReleaseFileNameInformation(nameInfo);
@@ -1351,8 +1251,7 @@ Return Value:
 		sizeof(gatekeeperData.DirectoryBufferDoNotUse) / sizeof(WCHAR), // Size, in characters.
 		nameInfo->Name.Buffer);
 	FLT_ASSERT(NT_SUCCESS(status)); // Via validation above.
-	FLT_ASSERT(nameInfo->Name.Length <= MAXUSHORT); // TODO Should not be assert.
-	FLT_ASSERT(nameInfo->Name.Length % sizeof(WCHAR) == 0);
+	
 	gatekeeperData.Directory.Length = (USHORT)nameInfo->Name.Length;
 	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&gatekeeperData.Directory)));
 
@@ -1382,42 +1281,17 @@ Return Value:
 
 --*/
 {
-	PLIST_ENTRY pList;
-	PREVOKE_RULE rule;
 	HANDLE logHandle;
 
+	// Empty revoke list.
+	RevokeListClear(&gatekeeperData.RevokeList);
 
-	//
-	// First, clear revoke list.
-	//
-
-	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
-
-	while (!IsListEmpty(&gatekeeperData.RevokeList)) {
-
-		pList = RemoveHeadList(&gatekeeperData.RevokeList);
-
-		rule = CONTAINING_RECORD(pList, REVOKE_RULE, ListBlock);
-		ExFreeToNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers, rule); // TODO Don't hold lock around free.
-
-	}
-
-	FltReleasePushLock(&gatekeeperData.RevokeListLock);
-
-
-	//
 	// Clear directory.
-	//
-
 	FltAcquirePushLockExclusive(&gatekeeperData.DirectoryLock);
 	gatekeeperData.Directory.Length = 0;
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
 
-
-	//
 	// Clear log file.
-	//
-
 	FltAcquirePushLockExclusive(&gatekeeperData.LogPathLock);
 	logHandle = gatekeeperData.LogHandle; // Close outside of lock.
 	gatekeeperData.LogHandle = NULL;
@@ -1426,158 +1300,8 @@ Return Value:
 }
 
 NTSTATUS
-GatekeeperMessageRevoke(
-	_In_ PGATEKEEPER_MSG Message
-)
-/*++
-
-Routine Description:
-
-	Creates a revoke rule. Does not detect duplicates.
-
-Arguments:
-
-	Message - Contains new item to add.
-
-Return Value:
-
-	NTSTATUS.
-
---*/
-{
-	NTSTATUS status;
-	size_t lengthChars;
-	size_t lengthBytes;
-	PREVOKE_RULE newRule;
-
-	FLT_ASSERT(Message->cmd == GatekeeperCmdRevoke);
-
-
-	//
-	// Validate string argument.
-	//
-
-	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
-	static_assert(GATEKEEPER_MAX_BYTES <= UNICODE_STRING_MAX_BYTES, "restrictions of UNICODE_STRING");
-
-	status = RtlStringCchLengthW(
-		Message->data,
-		sizeof(Message->data) / sizeof(Message->data[0]),
-		&lengthChars);
-	if (!NT_SUCCESS(status)) {
-		return status;
-	}
-	lengthBytes = lengthChars * sizeof(WCHAR);
-	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
-
-
-	//
-	// Create REVOKE_RULE structure.
-	//
-
-	newRule = ExAllocateFromNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
-	if (newRule == NULL) {
-		return STATUS_NO_MEMORY;
-	}
-
-	newRule->Rule.Buffer = newRule->RevokeRuleBufferDoNotUse;
-	newRule->Rule.MaximumLength = sizeof(newRule->RevokeRuleBufferDoNotUse); // In bytes.
-
-	status = RtlStringCchCopyW(newRule->Rule.Buffer, newRule->Rule.MaximumLength / sizeof(newRule->Rule.Buffer[0]), Message->data);
-	FLT_ASSERT(NT_SUCCESS(status)); // Due to above validation.
-	newRule->Rule.Length = (USHORT)lengthBytes;
-
-	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&newRule->Rule)));
-
-
-	//
-	// Insert into RevokeList.
-	//
-
-	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
-	InsertHeadList(&gatekeeperData.RevokeList, &newRule->ListBlock);
-	FltReleasePushLock(&gatekeeperData.RevokeListLock);
-
-	return STATUS_SUCCESS;
-}
-
-NTSTATUS
-GatekeeperMessageUnrevoke(
-	_In_ PGATEKEEPER_MSG Message
-)
-/*++
-
-Routine Description:
-
-	Delete a revoke rule. Does not handle duplicates. Case sensitive.
-
-Arguments:
-
-	Message - Revoke rule to delete.
-
-Return Value:
-
-	NTSTATUS. STATUS_NOT_FOUND if no such rule.
-
---*/
-{
-	NTSTATUS status;
-	size_t lengthChars;
-	size_t lengthBytes;
-	UNICODE_STRING ruleToDelete;
-
-	FLT_ASSERT(Message->cmd == GatekeeperCmdUnrevoke);
-
-
-	//
-	// Validate string argument.
-	//
-
-	status = RtlStringCchLengthW(
-		Message->data,
-		sizeof(Message->data) / sizeof(Message->data[0]),
-		&lengthChars);
-	if (!NT_SUCCESS(status)) {
-		return status;
-	}
-	lengthBytes = lengthChars * sizeof(WCHAR);
-	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
-
-	ruleToDelete.Buffer = Message->data;
-	ruleToDelete.MaximumLength = sizeof(Message->data);
-	ruleToDelete.Length = (USHORT)lengthBytes;
-	
-	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
-
-	PLIST_ENTRY head = &gatekeeperData.RevokeList;
-	PLIST_ENTRY prev = &gatekeeperData.RevokeList;
-	PLIST_ENTRY current = prev->Flink;
-
-	status = STATUS_NOT_FOUND;
-	while (current != head) {
-
-		PREVOKE_RULE rule = CONTAINING_RECORD(current, REVOKE_RULE, ListBlock);
-
-		if (RtlEqualUnicodeString(&ruleToDelete, &rule->Rule, FALSE)) {
-			// Remove from list.
-			prev->Flink = current->Flink;
-			current->Flink->Blink = prev;
-			status = STATUS_SUCCESS;
-			break;
-		}
-
-		prev = current;
-		current = prev->Flink;
-	}
-
-	FltReleasePushLock(&gatekeeperData.RevokeListLock);
-
-	return status;
-}
-
-NTSTATUS
 GatekeeperMessageSetLogFile(
-	_In_ PGATEKEEPER_MSG Message
+	_In_ PUNICODE_STRING Path
 )
 /*++
 
@@ -1587,7 +1311,7 @@ Routine Description:
 
 Arguments:
 
-	Message - Log path information.
+	Path - Requested log path.
 
 Return Value:
 
@@ -1596,45 +1320,19 @@ Return Value:
 --*/
 {
 	NTSTATUS status;
-	size_t lengthChars;
-	size_t lengthBytes;
 	HANDLE handle;
 	OBJECT_ATTRIBUTES oa;
-	UNICODE_STRING requestedName;
 	IO_STATUS_BLOCK ioStatus;
 	HANDLE oldHandle = NULL;
-
-	FLT_ASSERT(Message->cmd == GatekeeperCmdLogFile);
-
-
-	//
-	// Validate string argument.
-	//
-
-	status = RtlStringCchLengthW(
-		Message->data,
-		sizeof(Message->data) / sizeof(Message->data[0]),
-		&lengthChars);
-	if (!NT_SUCCESS(status)) {
-		return status;
-	}
-	lengthBytes = lengthChars * sizeof(WCHAR);
-	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
 
 
 	//
 	// Attempt open/create of file.
 	//
 
-	requestedName.Buffer = Message->data;
-	FLT_ASSERT(lengthBytes <= MAXUSHORT); // TODO Should not be assert.
-	requestedName.Length = (USHORT)lengthBytes;
-	requestedName.MaximumLength = (USHORT)lengthBytes;
-	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&requestedName)));
-
 	InitializeObjectAttributes(
 		&oa,
-		&requestedName,
+		Path,
 		OBJ_KERNEL_HANDLE,
 		NULL,
 		NULL);
@@ -1663,7 +1361,7 @@ Return Value:
 	FltAcquirePushLockExclusive(&gatekeeperData.LogPathLock);
 
 	oldHandle = gatekeeperData.LogHandle; // Close outside of lock.
-	RtlCopyUnicodeString(&gatekeeperData.LogPath, &requestedName);
+	RtlCopyUnicodeString(&gatekeeperData.LogPath, Path);
 	gatekeeperData.LogHandle = handle;
 
 	FltReleasePushLock(&gatekeeperData.LogPathLock);
@@ -1709,14 +1407,18 @@ Return Value:
 
  --*/
 {
+	GATEKEEPER_MSG message;
+	NTSTATUS status;
+	size_t lengthChars;
+	size_t lengthBytes;
+	UNICODE_STRING argument;
+
 	PAGED_CODE();
 
 	UNREFERENCED_PARAMETER(ConnectionCookie);
 	UNREFERENCED_PARAMETER(OutputBuffer);
 	UNREFERENCED_PARAMETER(OutputBufferSize);
 	UNREFERENCED_PARAMETER(ReturnOutputBufferSize);
-
-	GATEKEEPER_MSG message;
 
 
 	//
@@ -1734,19 +1436,49 @@ Return Value:
 	}
 
 
+	if (message.cmd == GatekeeperCmdDirectory ||
+		message.cmd == GatekeeperCmdRevoke ||
+		message.cmd == GatekeeperCmdUnrevoke ||
+		message.cmd == GatekeeperCmdLogFile) {
+
+		//
+		// Validate string argument and load into UNICODE_STRING.
+		//
+
+		static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
+		static_assert(GATEKEEPER_MAX_BYTES <= UNICODE_STRING_MAX_BYTES, "restrictions of UNICODE_STRING");
+
+		status = RtlStringCchLengthW(
+			message.data,
+			sizeof(message.data) / sizeof(message.data[0]),
+			&lengthChars);
+		if (!NT_SUCCESS(status)) {
+			return status;
+		}
+
+		lengthBytes = lengthChars * sizeof(WCHAR);
+		FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
+
+		RtlInitUnicodeString(&argument, message.data);
+	}
+	
+
+	//
+	// Dispatch command.
+	//
 
 	switch (message.cmd) {
 	case GatekeeperCmdClear:
 		GatekeeperClear();
 		return STATUS_SUCCESS;
 	case GatekeeperCmdDirectory:
-		return GatekeeperMessageSetDirectory(&message);
+		return GatekeeperMessageSetDirectory(&argument);
 	case GatekeeperCmdRevoke:
-		return GatekeeperMessageRevoke(&message);
+		return RevokeListAddRule(&gatekeeperData.RevokeList, &argument);
 	case GatekeeperCmdUnrevoke:
-		return GatekeeperMessageUnrevoke(&message);
+		return RevokeListRemoveRule(&gatekeeperData.RevokeList, &argument);
 	case GatekeeperCmdLogFile:
-		return GatekeeperMessageSetLogFile(&message);
+		return GatekeeperMessageSetLogFile(&argument);
 	default:
 		return STATUS_INVALID_PARAMETER;
 	}

@@ -35,6 +35,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Revoke.c" />
     <ResourceCompile Include="Gatekeeper.rc" />
     <ClCompile Include="Gatekeeper.c" />
     <Inf Include="Gatekeeper.inf" />
@@ -193,6 +194,9 @@
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Revoke.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
