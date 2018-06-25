@@ -31,10 +31,11 @@ usage(void)
 {
 	printf(
 		"Usage: gatectl <action> <arg>\n"
-		"       gatectl directory <directory>: Monitor provided directory (clearing previous)\n"
+		"       gatectl directory <path>: Monitor provided directory (clearing previous)\n"
 		"       gatectl clear: Clear all directory and revoke settings\n"
 	    "       gatectl revoke <str>: Revoke access to files (within directory) matching this string\n"
 	    "       gatectl unrevoke <str>: Remove previously created revoke rule\n"
+		"       gatectl logfile <path> Log accesses to monitored directory to specified file\n"
 	);
 }
 
@@ -99,7 +100,11 @@ wmain(
 	HRESULT hr;
 	GATEKEEPER_CMD cmd;
 	const wchar_t* argument = NULL;
-	WCHAR scratch[GATEKEEPER_MAX_BYTES]; // Temporary scratch space.
+	DWORD len;
+
+	// Temporary scratch space.
+	WCHAR scratchFullPath[GATEKEEPER_MAX_BYTES];
+	WCHAR scratchNormalized[GATEKEEPER_MAX_BYTES];
 
 
 	//
@@ -111,10 +116,7 @@ wmain(
 		return E_INVALIDARG;
 	}
 
-	if (wcscmp(argv[1], L"directory") == 0) {
-
-		WCHAR scratch2[GATEKEEPER_MAX_BYTES]; // Need more scratch space for path conversion.
-		DWORD len;
+	if (_wcsicmp(argv[1], L"directory") == 0) {
 
 		if (argc != 3) {
 			usage();
@@ -125,28 +127,29 @@ wmain(
 		// Convert path to weird format needed by driver.
 		//
 
-		len = GetFullPathNameW(argv[2], sizeof(scratch2) / sizeof(TCHAR), scratch2, NULL);
+		len = GetFullPathNameW(argv[2], sizeof(scratchFullPath) / sizeof(scratchFullPath[0]), scratchFullPath, NULL);
 		if (len == 0) {
 			// TODO Get error code.
 			return E_FAIL;
-		} else if (len > sizeof(scratch2) / sizeof(TCHAR)) {
+		} else if (len > sizeof(scratchFullPath) / sizeof(TCHAR)) {
 			return E_BOUNDS;
 		}
 
-		hr = StringCchPrintf(scratch, sizeof(scratch) / sizeof(scratch[0]), L"\\??\\%s", scratch2);
+		hr = StringCchPrintf(
+			scratchNormalized,
+			sizeof(scratchNormalized) / sizeof(scratchNormalized[0]),
+			L"\\??\\%s",
+			scratchFullPath);
 		if (FAILED(hr)) {
 			return hr;
 		}
 
-		printf("Setting directory to '%ls' ('%ls')...\n", scratch2, scratch);
-
-		// TODO Trailing \
+		printf("Setting directory to '%ls' ('%ls')...\n", scratchFullPath, scratchNormalized);
 
 		cmd = GatekeeperCmdDirectory;
-		argument = scratch;
+		argument = scratchNormalized;
 
-	}
-	else if (wcscmp(argv[1], L"revoke") == 0) {
+	} else if (_wcsicmp(argv[1], L"revoke") == 0) {
 
 		if (argc != 3) {
 			usage();
@@ -158,8 +161,7 @@ wmain(
 		cmd = GatekeeperCmdRevoke;
 		argument = argv[2];
 
-	}
-	else if (wcscmp(argv[1], L"unrevoke") == 0) {
+	} else if (_wcsicmp(argv[1], L"unrevoke") == 0) {
 
 		if (argc != 3) {
 			usage();
@@ -171,8 +173,7 @@ wmain(
 		cmd = GatekeeperCmdUnrevoke;
 		argument = argv[2];
 
-	}
-	else if (wcscmp(argv[1], L"clear") == 0) {
+	} else if (_wcsicmp(argv[1], L"clear") == 0) {
 
 		if (argc != 2) {
 			usage();
@@ -183,6 +184,39 @@ wmain(
 
 		cmd = GatekeeperCmdClear;
 
+	} else if (_wcsicmp(argv[1], L"logfile") == 0) {
+
+		if (argc != 3) {
+			usage();
+			return E_INVALIDARG;
+		}
+
+		//
+		// Convert path to weird format needed by driver.
+		//
+
+		len = GetFullPathNameW(argv[2], sizeof(scratchFullPath) / sizeof(scratchFullPath[0]), scratchFullPath, NULL);
+		if (len == 0) {
+			// TODO Get error code.
+			return E_FAIL;
+		}
+		else if (len > sizeof(scratchFullPath) / sizeof(TCHAR)) {
+			return E_BOUNDS;
+		}
+
+		hr = StringCchPrintf(
+			scratchNormalized,
+			sizeof(scratchNormalized) / sizeof(scratchNormalized[0]),
+			L"\\??\\%s",
+			scratchFullPath);
+		if (FAILED(hr)) {
+			return hr;
+		}
+
+		printf("Setting log file to '%ls' ('%ls')...\n", scratchFullPath, scratchNormalized);
+
+		cmd = GatekeeperCmdLogFile;
+		argument = scratchNormalized;
 	}
 	else {
 		usage();
@@ -203,7 +237,6 @@ wmain(
 		NULL,
 		&gatekeeperPort);
 	if (FAILED(hr)) {
-		// TODO Message..\ga	
 		printf("Failed to open driver port\n");
 		return hr;
 	}
@@ -213,10 +246,7 @@ wmain(
 	// Send message to driver and process response.
 	//
 
-	// TODO Any special handling of directory/clear calls.
-
 	hr = SendGatekeeperMessage(gatekeeperPort, cmd , argument);
-
 	if (SUCCEEDED(hr)) {
 		printf("Operation succeeded\n");
 	} else {

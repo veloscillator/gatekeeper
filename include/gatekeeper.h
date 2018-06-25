@@ -32,7 +32,8 @@ typedef enum {
 	GatekeeperCmdDirectory,
 	GatekeeperCmdClear,
 	GatekeeperCmdRevoke,
-	GatekeeperCmdUnrevoke
+	GatekeeperCmdUnrevoke,
+	GatekeeperCmdLogFile,
 
 } GATEKEEPER_CMD;
 

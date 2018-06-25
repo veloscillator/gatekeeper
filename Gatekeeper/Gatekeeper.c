@@ -43,7 +43,7 @@ typedef struct {
 	// TODO Do we really need UNICODE_STRING?
 	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
-	EX_PUSH_LOCK DirectoryLock; // TODO Read-write nature of this is crucial.
+	EX_PUSH_LOCK DirectoryLock;
 
 
 	//
@@ -57,6 +57,17 @@ typedef struct {
 	EX_PUSH_LOCK RevokeListLock;
 	
 
+	//
+	// File to log accesses to.
+	//
+	// TODO Keeping a handle open to this in a driver isn't the best. Do logs in user-mode or
+	//      defered IO.
+	//
+
+	HANDLE LogHandle;
+	UNICODE_STRING LogPath;
+	WCHAR LogPathBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by LogPath.
+	EX_PUSH_LOCK LogPathLock;
 
 } GATEKEEPER_DATA;
 
@@ -194,6 +205,9 @@ GatekeeperMessage(
 	_In_ ULONG OutputBufferSize,
 	_Out_ PULONG ReturnOutputBufferSize
 );
+
+void
+GatekeeperClear(void);
 
 EXTERN_C_END
 
@@ -616,12 +630,23 @@ Return Value:
     PT_DBG_PRINT( PTDBG_TRACE_ROUTINES,
                   ("Gatekeeper!GatekeeperUnload: Entered\n") );
 
+	// Stop incoming messages. Already assuming callbacks have been stopped.
 	FltCloseCommunicationPort(gatekeeperData.ServerPort);
 
+	GatekeeperClear();
+
+	// Log file state.
+	if (gatekeeperData.LogHandle != NULL) {
+		ZwClose(gatekeeperData.LogHandle);
+		gatekeeperData.LogHandle = NULL;
+	}
+	FltDeletePushLock(&gatekeeperData.LogPathLock);
+
+	// Directory state.
 	FltDeletePushLock(&gatekeeperData.DirectoryLock);
 	
-	// TODO Empty revoke list.
-	// TODO ExDeleteNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers);
+	// Revoke rules.
+	ExDeleteNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers); // GatekeeperClear freed all nodes.
 	FltDeletePushLock(&gatekeeperData.RevokeListLock);
 
     FltUnregisterFilter(gatekeeperData.Filter);
@@ -665,7 +690,10 @@ Return Value:
 
 --*/
 {
-	// TODO
+	
+	// TODO This catches non-create operations. Handle revoke after create.
+
+
 	UNREFERENCED_PARAMETER(Data);
 	UNREFERENCED_PARAMETER(FltObjects);
 	UNREFERENCED_PARAMETER(CompletionContext);
@@ -823,10 +851,26 @@ Return Value:
 	NTSTATUS status = STATUS_SUCCESS;
 	BOOLEAN ignoreCase = TRUE;
 
+	IO_STATUS_BLOCK ioStatus;
+	char logBuffer[GATEKEEPER_MAX_BYTES]; // TODO A lot of max_bytes in wchar buffers.
+	size_t logBufferSizeChars;
+	size_t logBufferRemainingChars;
+
+
     UNREFERENCED_PARAMETER( CompletionContext );
 
     PT_DBG_PRINT( PTDBG_TRACE_ROUTINES,
                   ("Gatekeeper!GatekeeperPreOperation: Entered\n") );
+
+
+	//
+	// Get name of opened file and check if it's within our monitored directory.
+	//
+
+	if (gatekeeperData.Directory.Length == 0) {
+		// Bail early if we're not monitoring anything.
+		goto exit;
+	}
 
 	if (FltObjects->FileObject == NULL) {
 		status = STATUS_UNSUCCESSFUL;
@@ -849,8 +893,53 @@ Return Value:
 		goto exit;
 	}
 
-	// TODO Log to file.
-	KdPrint(("Mine: %wZ\n", &nameInfo->Name));
+	
+	//
+	// This IO is within our directory. Log to file, it exists.
+	//
+
+	FltAcquirePushLockShared(&gatekeeperData.LogPathLock);
+
+	if (gatekeeperData.LogHandle != NULL) {
+
+		// Construct log message.
+		logBufferSizeChars = sizeof(logBuffer) / sizeof(logBuffer[0]);
+		status = RtlStringCchPrintfExA(
+			logBuffer,
+			logBufferSizeChars,
+			NULL,
+			&logBufferRemainingChars,
+			0,
+			"CREATE '%wZ'\r\n",
+			&nameInfo->Name);
+		FLT_ASSERT(status != STATUS_INVALID_PARAMETER);
+		// TODO status == STATUS_BUFFER_OVERFLOW resulted in truncation. We're just letting this happen now.
+
+		logBufferSizeChars = logBufferSizeChars - logBufferRemainingChars;
+
+		status = ZwWriteFile(
+			gatekeeperData.LogHandle,
+			NULL,
+			NULL,
+			NULL, 
+			&ioStatus,
+			logBuffer,
+			(ULONG)(logBufferSizeChars * sizeof(logBuffer[0])),
+			NULL,
+			NULL);
+		if (!NT_SUCCESS(status)) {
+			// TODO
+			FLT_ASSERT(FALSE);
+		}
+
+	}
+
+	FltReleasePushLock(&gatekeeperData.LogPathLock); 
+
+
+	//
+	// Apply revoke rules.
+	//
 
 	FltAcquirePushLockShared(&gatekeeperData.RevokeListLock);
 	
@@ -1217,6 +1306,7 @@ Return Value:
 	FLT_ASSERT(lengthBytes <= MAXUSHORT); // TODO Should not be assert.
 	requestedName.Length = (USHORT)lengthBytes;
 	requestedName.MaximumLength = (USHORT)lengthBytes;
+	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&requestedName)));
 
 	InitializeObjectAttributes(
 		&oa,
@@ -1260,14 +1350,10 @@ Return Value:
 
 
 	//
-	// Validation complete. Set directory.
+	// Validation complete. Set directory. This will overwrite any previous directory.
 	//
 
 	FltAcquirePushLockExclusive(&gatekeeperData.DirectoryLock);
-
-	if (gatekeeperData.Directory.Length != 0) {
-		// TODO Clear old info.
-	}
 
 	status = RtlStringCchCopyW(
 		gatekeeperData.Directory.Buffer,
@@ -1287,13 +1373,13 @@ Return Value:
 }
 
 void
-GatekeeperMessageClear(void)
+GatekeeperClear(void)
 /*++
 
 Routine Description:
 
 	Reset all state. Clears revoke rules and configured directory. State undefined
-	(but valid) if interleaved with other requests.
+	(but valid) if interleaved with other requests. Does not clear log file info.
 
 Arguments:
 
@@ -1334,6 +1420,9 @@ Return Value:
 	FltAcquirePushLockExclusive(&gatekeeperData.DirectoryLock);
 	gatekeeperData.Directory.Length = 0;
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
+
+
+	// TODO Consider clearing log file.
 }
 
 NTSTATUS
@@ -1480,6 +1569,106 @@ Return Value:
 }
 
 NTSTATUS
+GatekeeperMessageSetLogFile(
+	_In_ PGATEKEEPER_MSG Message
+)
+/*++
+
+Routine Description:
+
+	Set file to log accesses to.
+
+Arguments:
+
+	Message - Log path information.
+
+Return Value:
+
+	NTSTATUS.
+
+--*/
+{
+	NTSTATUS status;
+	size_t lengthChars;
+	size_t lengthBytes;
+	HANDLE handle;
+	OBJECT_ATTRIBUTES oa;
+	UNICODE_STRING requestedName;
+	IO_STATUS_BLOCK ioStatus;
+	HANDLE oldHandle = NULL;
+
+
+	//
+	// Validate string argument.
+	//
+
+	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
+	status = RtlStringCchLengthW(
+		Message->data,
+		sizeof(Message->data) / sizeof(Message->data[0]),
+		&lengthChars);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+	lengthBytes = lengthChars * sizeof(WCHAR);
+	FLT_ASSERT(lengthBytes + 1 <= GATEKEEPER_MAX_BYTES); // Via RtlStringCchLengthW return value.
+
+
+	//
+	// Attempt open/create of file.
+	//
+
+	requestedName.Buffer = Message->data;
+	FLT_ASSERT(lengthBytes <= MAXUSHORT); // TODO Should not be assert.
+	requestedName.Length = (USHORT)lengthBytes;
+	requestedName.MaximumLength = (USHORT)lengthBytes;
+	FLT_ASSERT(NT_SUCCESS(RtlUnicodeStringValidate(&requestedName)));
+
+	InitializeObjectAttributes(
+		&oa,
+		&requestedName,
+		OBJ_KERNEL_HANDLE,
+		NULL,
+		NULL);
+
+	status = ZwCreateFile(
+		&handle,
+		FILE_APPEND_DATA, // Desired access
+		&oa,
+		&ioStatus,
+		0,
+		FILE_ATTRIBUTE_NORMAL,
+		FILE_SHARE_READ | FILE_SHARE_WRITE,
+		FILE_OPEN_IF,
+		FILE_SYNCHRONOUS_IO_NONALERT, // TODO
+		NULL,
+		0);
+	if (!NT_SUCCESS(status)) {
+		return status;
+	}
+
+
+
+	//
+	// New file successfully opened. Swap into global structure.
+	//
+
+	FltAcquirePushLockExclusive(&gatekeeperData.LogPathLock);
+
+	oldHandle = gatekeeperData.LogHandle; // Close outside of lock.
+	RtlCopyUnicodeString(&gatekeeperData.LogPath, &requestedName);
+	gatekeeperData.LogHandle = handle;
+
+	FltReleasePushLock(&gatekeeperData.LogPathLock);
+
+	if (oldHandle != NULL) {
+		ZwClose(oldHandle);
+	}
+
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS
 GatekeeperMessage(
 	_In_ PVOID ConnectionCookie,
 	_In_reads_bytes_opt_(InputBufferSize) PVOID InputBuffer,
@@ -1537,10 +1726,12 @@ Return Value:
 		return GetExceptionCode();
 	}
 
+
+
 	// TODO Arguments to these maybe WCHAR*/len or UNICODE_STRING
 	switch (message.cmd) {
 	case GatekeeperCmdClear:
-		GatekeeperMessageClear();
+		GatekeeperClear();
 		return STATUS_SUCCESS;
 	case GatekeeperCmdDirectory:
 		return GatekeeperMessageSetDirectory(&message);
@@ -1548,6 +1739,8 @@ Return Value:
 		return GatekeeperMessageRevoke(&message);
 	case GatekeeperCmdUnrevoke:
 		return GatekeeperMessageUnrevoke(&message);
+	case GatekeeperCmdLogFile:
+		return GatekeeperMessageSetLogFile(&message);
 	default:
 		return STATUS_INVALID_PARAMETER;
 	}
