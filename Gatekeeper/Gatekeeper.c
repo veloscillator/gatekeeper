@@ -39,7 +39,7 @@ typedef struct {
 	// Path to directory we're monitoring. Monitoring off if Directory.Length == 0.
 	//
 
-	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by Directory.
+	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_WCHARS]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
 	EX_PUSH_LOCK DirectoryLock;
 
@@ -62,7 +62,7 @@ typedef struct {
 
 	HANDLE LogHandle;
 	UNICODE_STRING LogPath;
-	WCHAR LogPathBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by LogPath.
+	WCHAR LogPathBufferDoNotUse[GATEKEEPER_MAX_WCHARS]; // Don't directly reference. Managed by LogPath.
 	EX_PUSH_LOCK LogPathLock;
 
 } GATEKEEPER_DATA;
@@ -72,7 +72,7 @@ typedef struct {
 	LIST_ENTRY ListBlock;
 
 	UNICODE_STRING Rule;
-	WCHAR RevokeRuleBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't access directly.
+	WCHAR RevokeRuleBufferDoNotUse[GATEKEEPER_MAX_WCHARS]; // Don't access directly. Managed by Rule.
 
 } REVOKE_RULE, *PREVOKE_RULE;
 
@@ -278,7 +278,6 @@ CONST FLT_REGISTRATION FilterRegistration = {
     NULL                                //  NormalizeNameComponent
 
 };
-
 
 
 NTSTATUS
@@ -746,7 +745,6 @@ Return Value:
 			break;
 		}
 		if (charIndex >= pathChars) {
-			// TODO Think more about this. What if we are opening directory?
 			within = FALSE;
 			break;
 		}
@@ -849,7 +847,7 @@ Return Value:
 	BOOLEAN ignoreCase = TRUE;
 
 	IO_STATUS_BLOCK ioStatus;
-	char logBuffer[GATEKEEPER_MAX_BYTES]; // TODO A lot of max_bytes in wchar buffers.
+	char logBuffer[GATEKEEPER_MAX_BYTES];
 	size_t logBufferSizeChars;
 	size_t logBufferRemainingChars;
 
@@ -1279,7 +1277,6 @@ Return Value:
 	// Validate string argument.
 	//
 
-	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
 	status = RtlStringCchLengthW(
 		Message->data,
 		sizeof(Message->data) / sizeof(Message->data[0]),
@@ -1613,7 +1610,6 @@ Return Value:
 	// Validate string argument.
 	//
 
-	static_assert(GATEKEEPER_MAX_BYTES <= NTSTRSAFE_MAX_CCH, "restrictions of RtlStringCchLengthW");
 	status = RtlStringCchLengthW(
 		Message->data,
 		sizeof(Message->data) / sizeof(Message->data[0]),
@@ -1738,7 +1734,6 @@ Return Value:
 
 
 
-	// TODO Arguments to these maybe WCHAR*/len or UNICODE_STRING
 	switch (message.cmd) {
 	case GatekeeperCmdClear:
 		GatekeeperClear();

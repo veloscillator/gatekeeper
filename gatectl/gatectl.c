@@ -103,8 +103,8 @@ wmain(
 	DWORD len;
 
 	// Temporary scratch space.
-	WCHAR scratchFullPath[GATEKEEPER_MAX_BYTES];
-	WCHAR scratchNormalized[GATEKEEPER_MAX_BYTES];
+	WCHAR scratchFullPath[GATEKEEPER_MAX_WCHARS];
+	WCHAR scratchNormalized[GATEKEEPER_MAX_WCHARS];
 
 
 	//
@@ -129,7 +129,6 @@ wmain(
 
 		len = GetFullPathNameW(argv[2], sizeof(scratchFullPath) / sizeof(scratchFullPath[0]), scratchFullPath, NULL);
 		if (len == 0) {
-			// TODO Get error code.
 			return E_FAIL;
 		} else if (len > sizeof(scratchFullPath) / sizeof(TCHAR)) {
 			return E_BOUNDS;
@@ -197,7 +196,6 @@ wmain(
 
 		len = GetFullPathNameW(argv[2], sizeof(scratchFullPath) / sizeof(scratchFullPath[0]), scratchFullPath, NULL);
 		if (len == 0) {
-			// TODO Get error code.
 			return E_FAIL;
 		}
 		else if (len > sizeof(scratchFullPath) / sizeof(TCHAR)) {
