@@ -47,7 +47,7 @@ Return Value:
 		NULL,
 		NULL,
 		POOL_NX_ALLOCATION,
-		GATEKEEPER_MAX_BYTES,
+		sizeof(REVOKE_RULE),
 		GATEKEEPER_TAG,
 		0);
 	InitializeListHead(&RevokeList->Rules);
