@@ -24,7 +24,6 @@ Environment:
 #pragma prefast(disable:__WARNING_ENCODE_MEMBER_FUNCTION_POINTER, "Not valid for kernel mode drivers")
 
 
-
 #define GATEKEEPER_TAG 'gtKP' // Tag memory allocations to detect leaks.
 
 
@@ -37,10 +36,9 @@ typedef struct {
 
 
 	//
-	// TODO Lot's to say here.
+	// Path to directory we're monitoring. Monitoring off if Directory.Length == 0.
 	//
 
-	// TODO Do we really need UNICODE_STRING?
 	WCHAR DirectoryBufferDoNotUse[GATEKEEPER_MAX_BYTES]; // Don't directly reference. Managed by Directory.
 	UNICODE_STRING Directory;
 	EX_PUSH_LOCK DirectoryLock;
@@ -48,8 +46,6 @@ typedef struct {
 
 	//
 	// List of revoke items.
-	//
-	// TODO Limit on length of list?
 	//
 	
 	LIST_ENTRY RevokeList;
@@ -80,8 +76,9 @@ typedef struct {
 
 } REVOKE_RULE, *PREVOKE_RULE;
 
-GATEKEEPER_DATA gatekeeperData;
 
+// Global data block for gatekeeper.
+GATEKEEPER_DATA gatekeeperData;
 
 ULONG_PTR OperationStatusCtx = 1;
 
@@ -928,8 +925,7 @@ Return Value:
 			NULL,
 			NULL);
 		if (!NT_SUCCESS(status)) {
-			// TODO
-			FLT_ASSERT(FALSE);
+			// TODO If logging fails, we continue for now. Should consider failing the IO.
 		}
 
 	}
@@ -964,7 +960,6 @@ Return Value:
 	FltReleasePushLock(&gatekeeperData.RevokeListLock);
 
 	if (matched) {
-		KdPrint(("Match: %wZ\n", &nameInfo->Name));
 		status = STATUS_ACCESS_DENIED;
 		returnStatus = FLT_PREOP_COMPLETE;
 	}
@@ -1215,8 +1210,6 @@ Return Value:
 	UNREFERENCED_PARAMETER(SizeOfContext);
 	UNREFERENCED_PARAMETER(ConnectionCookie);
 
-	// TODO Don't have much of a reason to store this unless we're communicating back.
-	// TODO Is there a potential race here?
 	FLT_ASSERT(gatekeeperData.ClientPort == NULL); // Set MaxConnections to 1. Expect that to be enforced.
 	gatekeeperData.ClientPort = ClientPort;
 
@@ -1393,6 +1386,7 @@ Return Value:
 {
 	PLIST_ENTRY pList;
 	PREVOKE_RULE rule;
+	HANDLE logHandle;
 
 
 	//
@@ -1406,7 +1400,7 @@ Return Value:
 		pList = RemoveHeadList(&gatekeeperData.RevokeList);
 
 		rule = CONTAINING_RECORD(pList, REVOKE_RULE, ListBlock);
-		ExFreeToNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers, rule); // TODO Don't hold lock around me.
+		ExFreeToNPagedLookasideList(&gatekeeperData.RevokeListFreeBuffers, rule); // TODO Don't hold lock around free.
 
 	}
 
@@ -1422,7 +1416,15 @@ Return Value:
 	FltReleasePushLock(&gatekeeperData.DirectoryLock);
 
 
-	// TODO Consider clearing log file.
+	//
+	// Clear log file.
+	//
+
+	FltAcquirePushLockExclusive(&gatekeeperData.LogPathLock);
+	logHandle = gatekeeperData.LogHandle; // Close outside of lock.
+	gatekeeperData.LogHandle = NULL;
+	FltReleasePushLock(&gatekeeperData.LogPathLock);
+	ZwClose(logHandle);
 }
 
 NTSTATUS
@@ -1451,6 +1453,7 @@ Return Value:
 	PREVOKE_RULE newRule;
 
 	FLT_ASSERT(Message->cmd == GatekeeperCmdRevoke);
+
 
 	//
 	// Validate string argument.
@@ -1525,7 +1528,13 @@ Return Value:
 	size_t lengthBytes;
 	UNICODE_STRING ruleToDelete;
 
-	// TODO Getting repetitive.
+	FLT_ASSERT(Message->cmd == GatekeeperCmdUnrevoke);
+
+
+	//
+	// Validate string argument.
+	//
+
 	status = RtlStringCchLengthW(
 		Message->data,
 		sizeof(Message->data) / sizeof(Message->data[0]),
@@ -1540,7 +1549,7 @@ Return Value:
 	ruleToDelete.MaximumLength = sizeof(Message->data);
 	ruleToDelete.Length = (USHORT)lengthBytes;
 	
-	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock); // TODO Can get shared and upgrade.
+	FltAcquirePushLockExclusive(&gatekeeperData.RevokeListLock);
 
 	PLIST_ENTRY head = &gatekeeperData.RevokeList;
 	PLIST_ENTRY prev = &gatekeeperData.RevokeList;
@@ -1597,6 +1606,8 @@ Return Value:
 	IO_STATUS_BLOCK ioStatus;
 	HANDLE oldHandle = NULL;
 
+	FLT_ASSERT(Message->cmd == GatekeeperCmdLogFile);
+
 
 	//
 	// Validate string argument.
@@ -1640,13 +1651,12 @@ Return Value:
 		FILE_ATTRIBUTE_NORMAL,
 		FILE_SHARE_READ | FILE_SHARE_WRITE,
 		FILE_OPEN_IF,
-		FILE_SYNCHRONOUS_IO_NONALERT, // TODO
+		FILE_SYNCHRONOUS_IO_NONALERT,
 		NULL,
 		0);
 	if (!NT_SUCCESS(status)) {
 		return status;
 	}
-
 
 
 	//
