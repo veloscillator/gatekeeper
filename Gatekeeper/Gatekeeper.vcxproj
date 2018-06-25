@@ -181,15 +181,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <FilesToPackage Include="S:\Code\gatekeeper\test\sanity.bat">
+    <FilesToPackage Include="$(SolutionDir)test\sanity.bat">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="S:\Code\gatekeeper\x64\Debug\Gatekeeper.sys">
+    <FilesToPackage Include="$(SolutionDir)x64\Debug\Gatekeeper.sys">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
-    <FilesToPackage Include="S:\Code\gatekeeper\\x64\Debug\gatectl.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <FilesToPackage Include="$(SolutionDir)x64\Debug\gatectl.exe" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
       <PackageRelativeDirectory>
       </PackageRelativeDirectory>
     </FilesToPackage>
